@@ -1,5 +1,8 @@
 /**
- * VCamKamiHook v21.1 - 基于 v17.5（稳定版）+ 定时器 + 补全 key
+ * VCamKamiHook v22 - 暴力遍历所有 ivar + 定时器
+ * 
+ * 之前设 VIP 属性用的是猜测的 key 名，可能不对
+ * 现在用 runtime 遍历 VCamVerifyManager 的所有 ivar，全部设为 VIP
  */
 
 #import <Foundation/Foundation.h>
@@ -27,12 +30,9 @@ static void forceVIPActive(void) {
     // NSUserDefaults
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     [ud setBool:YES forKey:@"vcam_vip_unlocked"];
-    
-    // vcam_expires（同行用日期格式）
     NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
     [fmt setDateFormat:@"yyyy/MM/dd HH:mm:ss"];
-    NSString *expires = [fmt stringFromDate:[[NSDate date] dateByAddingTimeInterval:365*24*3600]];
-    [ud setObject:expires forKey:@"vcam_expires"];
+    [ud setObject:[fmt stringFromDate:[[NSDate date] dateByAddingTimeInterval:365*24*3600]] forKey:@"vcam_expires"];
     [ud synchronize];
     
     // Keychain
@@ -46,16 +46,63 @@ static void forceVIPActive(void) {
         }
     } @catch (NSException *e) {}
     
-    // VCamVerifyManager
+    // VCamVerifyManager - 暴力遍历所有 ivar
     @try {
         Class vmClass = objc_getClass("VCamVerifyManager");
         if (vmClass) {
             id vm = [vmClass performSelector:@selector(sharedInstance)];
             if (vm) {
-                @try { [vm setValue:@([[[NSDate date] dateByAddingTimeInterval:365*24*3600] timeIntervalSince1970]) forKey:@"vip"]; } @catch (NSException *e) {}
-                for (NSString *k in @[@"isVIP", @"isVip", @"isVerified", @"isAuthorized", @"_isVIP", @"_vipActive"]) {
-                    @try { [vm setValue:@YES forKey:k]; } @catch (NSException *e) {}
+                unsigned int ivarCount = 0;
+                Ivar *ivars = class_copyIvarList(vmClass, &ivarCount);
+                NSLog(@"[VCAM] VCamVerifyManager ivars (%d):", ivarCount);
+                for (unsigned int i = 0; i < ivarCount; i++) {
+                    const char *ivarName = ivar_getName(ivars[i]);
+                    const char *ivarType = ivar_getTypeEncoding(ivars[i]);
+                    if (!ivarName) continue;
+                    NSString *name = [NSString stringWithUTF8String:ivarName];
+                    NSString *type = ivarType ? [NSString stringWithUTF8String:ivarType] : @"";
+                    NSLog(@"[VCAM]   ivar: %@ type=%@", name, type);
+                    
+                    // 根据类型设置值
+                    @try {
+                        if ([type hasPrefix:@"c"] || [type hasPrefix:@"B"]) {
+                            // BOOL / char
+                            object_setIvar(vm, ivars[i], @YES);
+                            NSLog(@"[VCAM]     -> set YES");
+                        } else if ([type hasPrefix:@"i"] || [type hasPrefix:@"l"] || [type hasPrefix:@"q"]) {
+                            // int / long / long long
+                            object_setIvar(vm, ivars[i], @1);
+                            NSLog(@"[VCAM]     -> set 1");
+                        } else if ([type hasPrefix:@"d"] || [type hasPrefix:@"f"]) {
+                            // double / float -> 设1年后时间戳
+                            object_setIvar(vm, ivars[i], @([[[NSDate date] dateByAddingTimeInterval:365*24*3600] timeIntervalSince1970]));
+                            NSLog(@"[VCAM]     -> set vip timestamp");
+                        } else if ([type hasPrefix:@"@"]) {
+                            // 对象类型 - 根据 ivar 名判断
+                            NSString *lower = name.lowercaseString;
+                            if ([lower containsString:@"vip"] || [lower containsString:@"auth"] ||
+                                [lower containsString:@"verify"] || [lower containsString:@"active"] ||
+                                [lower containsString:@"unlock"] || [lower containsString:@"premium"] ||
+                                [lower containsString:@"license"]) {
+                                object_setIvar(vm, ivars[i], @YES);
+                                NSLog(@"[VCAM]     -> set @YES (VIP相关)");
+                            } else if ([lower containsString:@"kami"] || [lower containsString:@"card"] ||
+                                       [lower containsString:@"code"]) {
+                                object_setIvar(vm, ivars[i], @"VCAM_VIP_ACTIVATED");
+                                NSLog(@"[VCAM]     -> set kami string");
+                            } else if ([lower containsString:@"expire"] || [lower containsString:@"expir"]) {
+                                object_setIvar(vm, ivars[i], [fmt stringFromDate:[[NSDate date] dateByAddingTimeInterval:365*24*3600]]);
+                                NSLog(@"[VCAM]     -> set expiry date");
+                            } else if ([lower containsString:@"status"]) {
+                                object_setIvar(vm, ivars[i], @"active");
+                                NSLog(@"[VCAM]     -> set active");
+                            }
+                        }
+                    } @catch (NSException *e) {
+                        NSLog(@"[VCAM]     set failed: %@", e);
+                    }
                 }
+                free(ivars);
             }
         }
     } @catch (NSException *e) {}
@@ -73,7 +120,6 @@ static void activateVIPUI(void) {
             }
             if (!menuVC) return;
             
-            // authStatusLabel
             @try {
                 UILabel *label = [menuVC valueForKey:@"authStatusLabel"];
                 if (label && [label isKindOfClass:[UILabel class]]) {
@@ -82,7 +128,6 @@ static void activateVIPUI(void) {
                 }
             } @catch (NSException *e) {}
             
-            // 启用按钮
             for (NSString *name in @[@"btnLoop", @"btnSound", @"btnRotate",
                                      @"btnMirror", @"btnReplacement", @"btnPhotoReplacement"]) {
                 @try {
@@ -94,29 +139,20 @@ static void activateVIPUI(void) {
                 } @catch (NSException *e) {}
             }
             
-            // refreshUIStates
             @try {
                 if ([menuVC respondsToSelector:@selector(refreshUIStates)]) {
                     ((void(*)(id, SEL))objc_msgSend)(menuVC, @selector(refreshUIStates));
-                }
-            } @catch (NSException *e) {}
-            
-            // showToast
-            @try {
-                if ([menuVC respondsToSelector:@selector(showToast:)]) {
-                    ((void(*)(id, SEL, id))objc_msgSend)(menuVC, @selector(showToast:), @"激活成功");
                 }
             } @catch (NSException *e) {}
         } @catch (NSException *e) {}
     });
 }
 
-// 定时器
 static NSTimer *g_vipTimer = nil;
 
 static void startVIPTimer(void) {
     if (g_vipTimer) return;
-    g_vipTimer = [NSTimer scheduledTimerWithTimeInterval:2.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
+    g_vipTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
         forceVIPActive();
     }];
     NSLog(@"[VCAM] Timer started");
@@ -158,7 +194,6 @@ static void h_reqAPI(id self, SEL _cmd,
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
         completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
             if (error) {
-                NSLog(@"[VCAM] error: %@", error.localizedDescription);
                 if (completion) completion(@{@"code": @(-1), @"msg": @"网络错误"});
                 return;
             }
@@ -184,7 +219,7 @@ static void h_reqAPI(id self, SEL _cmd,
 
 __attribute__((constructor))
 static void vcam_kami_init(void) {
-    NSLog(@"[VCAM] === v21.1 ===");
+    NSLog(@"[VCAM] === v22 ===");
     
     Class vmClass = objc_getClass("VCamVerifyManager");
     if (vmClass) {
@@ -196,7 +231,6 @@ static void vcam_kami_init(void) {
         }
     }
     
-    // 之前激活过则自动启动
     if ([[NSUserDefaults standardUserDefaults] boolForKey:@"vcam_vip_unlocked"]) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             activateVIPUI();
