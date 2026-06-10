@@ -128,7 +128,7 @@ static void h_requestAPI(id self, SEL _cmd,
         }
     } @catch (NSException *e) {}
     
-    if ([udid isEqualToString:@"unknown"])) {
+    if ([udid isEqualToString:@"unknown"]) {
         @try { udid = [[[UIDevice currentDevice] identifierForVendor] UUIDString] ?: @"unknown"; } @catch (NSException *e) {}
     }
     
