@@ -166,6 +166,16 @@ static NSURLSessionDataTask *h_dataTaskWithRequest(id self, SEL _cmd,
 
 #pragma mark - 初始化
 
+// 辅助：检查类继承关系
+static BOOL class_isSubclass(Class cls, Class parent) {
+    Class c = cls;
+    while (c) {
+        if (c == parent) return YES;
+        c = class_getSuperclass(c);
+    }
+    return NO;
+}
+
 __attribute__((constructor))
 static void vcam_kami_init(void) {
     NSLog(@"[VCAM] === VCamKamiHook v9 (xnsp intercept) ===");
@@ -207,12 +217,4 @@ static void vcam_kami_init(void) {
     NSLog(@"[VCAM] VCamKamiHook v9 Ready");
 }
 
-// 辅助：检查类继承关系
-static BOOL class_isSubclass(Class cls, Class parent) {
-    Class c = cls;
-    while (c) {
-        if (c == parent) return YES;
-        c = class_getSuperclass(c);
-    }
-    return NO;
-}
+
