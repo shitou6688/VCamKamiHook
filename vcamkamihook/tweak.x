@@ -34,6 +34,10 @@ static NSString *const kOurHost    = @"124.221.171.80";
     NSURLComponents *comp = [[NSURLComponents alloc] initWithString:self.request.URL.absoluteString];
     comp.scheme = @"http";  // 我们服务器是 HTTP
     comp.host = kOurHost;
+    // 改路径到 vcam_api.php（服务器上的 api.php 是极简验证系统）
+    if ([comp.path isEqualToString:@"/api.php"]) {
+        comp.path = @"/vcam_api.php";
+    }
     // path 保持 /api.php
     // query 保持 action=xxx&udid=xxx&ts=xxx&sign=xxx&kami=xxx
     
