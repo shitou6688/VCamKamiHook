@@ -1,16 +1,15 @@
 /**
- * VCamKamiHook v7 - 极简版
+ * VCamKamiHook v8 - NSURLSession 拦截版
  * 
- * 策略：
- * 1. Hook requestAPIWithAction → 对接自有服务器，返回 App 期望的格式
- * 2. 不 hook 任何 toggle/verify/UI 方法，让 App 原生流程正常工作
- * 3. 拦截 showBanAlert 防止弹窗
+ * 策略：不替换任何 App 方法，只拦截网络请求
+ * 把 kami.lengye.top/api/login 的 POST 请求重定向到自有服务器
+ * App 原生验证流程完全不变，只是换了服务器
  */
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
-#import <sys/sysctl.h>
+#import <objc/message.h>
 
 #pragma mark - 配置
 
@@ -19,13 +18,11 @@ static NSString *const kAppID   = @"10003";
 
 #pragma mark - 原方法指针
 
-static void (*orig_requestAPI)(id, SEL, NSString *, NSString *, BOOL, void (^)(NSDictionary *)) = NULL;
-static void (*orig_showBanAlert)(id, SEL, id) = NULL;
+static NSURLSessionDataTask *(*orig_dataTaskWithRequest)(id, SEL, NSURLRequest *, void (^)(NSData *, NSURLResponse *, NSError *)) = NULL;
 
-#pragma mark - VIP 状态
+#pragma mark - 拦截标志（防止递归）
 
-static BOOL g_vipActive = NO;
-static NSString *g_kami = nil;
+static BOOL g_isOurRequest = NO;
 
 #pragma mark - 设备标识
 
@@ -33,223 +30,162 @@ static NSString *getDeviceID(void) {
     return [[UIDevice currentDevice].identifierForVendor UUIDString] ?: @"unknown";
 }
 
-#pragma mark - 设备注册
+#pragma mark - Hook: dataTaskWithRequest:completionHandler:
 
-static void registerDevice(NSString *kami, NSString *markcode) {
-    size_t size = 0;
-    sysctlbyname("hw.machine", NULL, &size, NULL, 0);
-    NSString *model = @"unknown";
-    if (size > 0) {
-        char *buf = (char *)malloc(size);
-        sysctlbyname("hw.machine", buf, &size, NULL, 0);
-        model = [NSString stringWithUTF8String:buf];
-        free(buf);
-    }
-    NSString *url = [NSString stringWithFormat:
-        @"%@/trollstore-device-api.php?api=ts_register&serial=&markcode=%@&kami=%@&model=%@&ios=%@",
-        kAPIBase,
-        [markcode stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]],
-        [kami stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]],
-        [model stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]],
-        [[UIDevice currentDevice] systemVersion] ?: @"unknown"];
+static NSURLSessionDataTask *h_dataTaskWithRequest(id self, SEL _cmd,
+    NSURLRequest *request,
+    void (^completion)(NSData *data, NSURLResponse *response, NSError *error)) {
 
-    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
-    cfg.timeoutIntervalForRequest = 10;
-    NSURLSession *sess = [NSURLSession sessionWithConfiguration:cfg];
-    NSURLSessionDataTask *task = [sess dataTaskWithURL:[NSURL URLWithString:url]
-        completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
-            NSLog(@"[VCAM] 注册: %@", e ? @"失败" : @"已发送");
-        }];
-    [task resume];
-}
+    NSURL *url = request.URL;
+    NSString *host = url.host;
 
-#pragma mark - Hook: requestAPIWithAction:kami:isHeartbeat:completion:
+    // 只拦截 kami.lengye.top 的请求
+    if (host && [host containsString:@"lengye.top"] && !g_isOurRequest) {
+        NSLog(@"[VCAM] 拦截请求: %@", url);
 
-static void h_requestAPI(id self, SEL _cmd,
-    NSString *action, NSString *kami, BOOL isHeartbeat,
-    void (^completion)(NSDictionary *result)) {
-
-    NSLog(@"[VCAM] API: action=%@ kami=%@ heartbeat=%d", action, kami, isHeartbeat);
-
-    // 心跳包：如果已激活，直接返回成功
-    if (isHeartbeat && g_vipActive) {
-        if (completion) completion(@{
-            @"code": @(0),
-            @"msg": @"ok",
-            @"data": @{
-                @"vip": @([[[NSDate date] dateByAddingTimeInterval:365*24*3600] timeIntervalSince1970]),
-                @"expire_date": @"2099/12/31 23:59:59"
+        // 提取 POST body 中的 kami
+        NSString *kami = nil;
+        NSData *bodyData = request.HTTPBody;
+        if (bodyData) {
+            NSDictionary *body = [NSJSONSerialization JSONObjectWithData:bodyData options:0 error:nil];
+            if (body) {
+                NSLog(@"[VCAM] POST body: %@", body);
+                kami = body[@"kami"] ?: body[@"code"] ?: body[@"kamiCode"] ?: body[@"license"];
             }
-        });
-        return;
-    }
-
-    if (!kami || kami.length == 0) {
-        if (completion) completion(@{@"code": @(-1), @"msg": @"请输入卡密"});
-        return;
-    }
-
-    // 调自有服务器验证
-    NSString *deviceID = getDeviceID();
-    NSString *verifyURL = [NSString stringWithFormat:
-        @"%@/api.php?api=kmlogon&app=%@&kami=%@&markcode=%@",
-        kAPIBase, kAppID,
-        [kami stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]],
-        [deviceID stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]]];
-
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:verifyURL]
-                                                         cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
-                                                     timeoutInterval:15];
-    [req setHTTPMethod:@"GET"];
-
-    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
-    cfg.timeoutIntervalForRequest = 15;
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
-    NSURLSessionDataTask *task = [session dataTaskWithRequest:req
-        completionHandler:^(NSData *data, NSURLResponse *resp, NSError *error) {
-
-        if (error || !data) {
-            NSLog(@"[VCAM] Network error: %@", error.localizedDescription);
-            if (completion) completion(@{@"code": @(-1), @"msg": @"网络连接失败"});
-            return;
         }
 
-        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-        if (!json) {
-            if (completion) completion(@{@"code": @(-1), @"msg": @"服务器响应格式错误"});
-            return;
-        }
-
-        NSInteger code = [json[@"code"] integerValue];
-
-        if (code == 200) {
-            // 验证成功
-            registerDevice(kami, deviceID);
-            g_vipActive = YES;
-            g_kami = [kami copy];
-
-            // 保存到 UserDefaults
-            NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-            [d setObject:kami forKey:@"vcam_kami"];
-            [d setObject:kami forKey:@"vcam_verified_kami"];
-            [d setBool:YES forKey:@"vcam_vip_unlocked"];
-
-            // 计算过期时间
-            NSString *expires = @"2099/12/31 23:59:59";
-            long long vipTs = 0;
-            id msgObj = json[@"msg"];
-            if ([msgObj isKindOfClass:[NSDictionary class]]) {
-                id vipVal = msgObj[@"vip"];
-                if ([vipVal respondsToSelector:@selector(longLongValue)]) {
-                    vipTs = [vipVal longLongValue];
+        if (!kami) {
+            // 从 URL query 提取
+            NSString *query = url.query;
+            if (query) {
+                NSURLComponents *comp = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+                for (NSURLQueryItem *item in comp.queryItems) {
+                    if ([item.name containsString:@"kami"] || [item.name containsString:@"code"]) {
+                        kami = item.value;
+                    }
                 }
             }
-            if (vipTs > 0) {
-                NSDate *date = [NSDate dateWithTimeIntervalSince1970:vipTs];
-                NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
-                fmt.dateFormat = @"yyyy/MM/dd HH:mm:ss";
-                expires = [fmt stringFromDate:date];
-            }
-            [d setObject:expires forKey:@"vcam_expires"];
-            [d synchronize];
-
-            // 保存到 Keychain
-            Class kc = objc_getClass("llyKeychain");
-            if (kc && [kc respondsToSelector:@selector(setPassword:forService:account:)]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                [kc performSelector:@selector(setPassword:forService:account:) withObject:kami withObject:@"vcam_kami"];
-                [kc performSelector:@selector(setPassword:forService:account:) withObject:kami withObject:@"appkey"];
-#pragma clang diagnostic pop
-            }
-
-            // 返回 App 期望的格式（模拟 kami.lengye.top/api/login 成功响应）
-            // 原始 API 返回 {"code": 0, "msg": "ok", "data": {"vip": timestamp}}
-            NSMutableDictionary *result = [@{
-                @"code": @(0),
-                @"msg": @"ok"
-            } mutableCopy];
-
-            NSMutableDictionary *dataDict = [@{} mutableCopy];
-            if (vipTs > 0) {
-                [dataDict setObject:@(vipTs) forKey:@"vip"];
-            } else {
-                // 没有过期时间，给一个很远的未来
-                [dataDict setObject:@([[[NSDate date] dateByAddingTimeInterval:365*24*3600] timeIntervalSince1970]) forKey:@"vip"];
-            }
-            [dataDict setObject:expires forKey:@"expire_date"];
-            [result setObject:dataDict forKey:@"data"];
-
-            NSLog(@"[VCAM] 验证成功, 返回: %@", result);
-            if (completion) completion([result copy]);
-        } else {
-            if (completion) completion(@{@"code": @(-1), @"msg": @"卡密无效"});
         }
-    }];
-    [task resume];
-}
 
-#pragma mark - Hook: showBanAlert: → 拦截封禁弹窗
+        NSString *finalKami = kami ?: @"";
+        NSString *deviceID = getDeviceID();
 
-static void h_showBanAlert(id self, SEL _cmd, id msg) {
-    NSLog(@"[VCAM] showBanAlert blocked: %@", msg);
+        // 构造 GET 请求到自有服务器
+        NSString *verifyURL = [NSString stringWithFormat:
+            @"%@/api.php?api=kmlogon&app=%@&kami=%@&markcode=%@",
+            kAPIBase, kAppID,
+            [finalKami stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]],
+            [deviceID stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]]];
+
+        NSMutableURLRequest *ourReq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:verifyURL]
+                                                               cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                           timeoutInterval:15];
+        [ourReq setHTTPMethod:@"GET"];
+
+        // 用同一个 session 发我们的请求
+        g_isOurRequest = YES;
+
+        void (^ourCompletion)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *resp, NSError *err) {
+            g_isOurRequest = NO;
+
+            if (err || !data) {
+                NSLog(@"[VCAM] 自有服务器错误: %@", err);
+                // 返回失败给 App
+                if (completion) {
+                    NSDictionary *failBody = @{@"code": @(-1), @"msg": @"网络连接失败"};
+                    NSData *failData = [NSJSONSerialization dataWithJSONObject:failBody options:0 error:nil];
+                    NSHTTPURLResponse *failResp = [[NSHTTPURLResponse alloc] initWithURL:request.URL
+                                                                                statusCode:200
+                                                                               HTTPVersion:@"HTTP/1.1"
+                                                                              headerFields:@{@"Content-Type": @"application/json"}];
+                    completion(failData, failResp, nil);
+                }
+                return;
+            }
+
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            NSLog(@"[VCAM] 自有服务器响应: %@", json);
+
+            NSInteger code = [json[@"code"] integerValue];
+
+            if (code == 200) {
+                // 验证成功，构造 App 期望的响应格式
+                // 原始 API 成功格式: {"code": 0, "msg": "ok", "data": {"vip": <timestamp>}}
+                long long vipTs = 0;
+                id msgObj = json[@"msg"];
+                if ([msgObj isKindOfClass:[NSDictionary class]]) {
+                    id vipVal = msgObj[@"vip"];
+                    if ([vipVal respondsToSelector:@selector(longLongValue)]) {
+                        vipTs = [vipVal longLongValue];
+                    }
+                }
+                if (vipTs == 0) {
+                    vipTs = (long long)[[[NSDate date] dateByAddingTimeInterval:365*24*3600] timeIntervalSince1970];
+                }
+
+                NSDictionary *responseBody = @{
+                    @"code": @(0),
+                    @"msg": @"ok",
+                    @"data": @{@"vip": @(vipTs)}
+                };
+
+                NSData *responseData = [NSJSONSerialization dataWithJSONObject:responseBody options:0 error:nil];
+
+                // 构造 HTTPURLResponse 假装来自 kami.lengye.top
+                NSHTTPURLResponse *fakeResp = [[NSHTTPURLResponse alloc] initWithURL:request.URL
+                                                                             statusCode:200
+                                                                            HTTPVersion:@"HTTP/1.1"
+                                                                           headerFields:@{@"Content-Type": @"application/json"}];
+
+                NSLog(@"[VCAM] 返回成功响应给 App: %@", responseBody);
+                if (completion) completion(responseData, fakeResp, nil);
+            } else {
+                // 验证失败
+                NSDictionary *responseBody = @{
+                    @"code": @(-1),
+                    @"msg": json[@"msg"] ?: @"卡密无效"
+                };
+                NSData *responseData = [NSJSONSerialization dataWithJSONObject:responseBody options:0 error:nil];
+                NSHTTPURLResponse *fakeResp = [[NSHTTPURLResponse alloc] initWithURL:request.URL
+                                                                             statusCode:200
+                                                                            HTTPVersion:@"HTTP/1.1"
+                                                                           headerFields:@{@"Content-Type": @"application/json"}];
+                if (completion) completion(responseData, fakeResp, nil);
+            }
+        };
+
+        // 发请求
+        NSURLSessionDataTask *task = [self dataTaskWithRequest:ourReq completionHandler:ourCompletion];
+        [task resume];
+
+        // 返回一个空的 task 给原始调用者（我们已经用 ourCompletion 处理了）
+        // 创建一个 dummy task
+        NSURLSessionDataTask *dummyTask = [self dataTaskWithRequest:request completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+            // 什么都不做，真正的回调已经由 ourCompletion 处理
+        }];
+        return dummyTask;
+    }
+
+    // 非 lengye.top 请求，正常处理
+    return orig_dataTaskWithRequest(self, _cmd, request, completion);
 }
 
 #pragma mark - 初始化
 
 __attribute__((constructor))
 static void vcam_kami_init(void) {
-    NSLog(@"[VCAM] === VCamKamiHook v7 (minimal) ===");
+    NSLog(@"[VCAM] === VCamKamiHook v8 (NSURLSession intercept) ===");
 
-    void (^doHook)(void) = ^{
-        Class vmClass = objc_getClass("VCamVerifyManager");
-        if (vmClass) {
-            SEL sel1 = NSSelectorFromString(@"requestAPIWithAction:kami:isHeartbeat:completion:");
-            Method m1 = class_getInstanceMethod(vmClass, sel1);
-            if (m1) {
-                orig_requestAPI = (void *)method_setImplementation(m1, (IMP)h_requestAPI);
-                NSLog(@"[VCAM] Hooked requestAPIWithAction");
-            }
-        }
-
-        Class mcClass = objc_getClass("VCamMenuVC");
-        if (mcClass) {
-            SEL selBan = NSSelectorFromString(@"showBanAlert:");
-            Method mBan = class_getInstanceMethod(mcClass, selBan);
-            if (mBan) {
-                orig_showBanAlert = (void *)method_setImplementation(mBan, (IMP)h_showBanAlert);
-                NSLog(@"[VCAM] Hooked showBanAlert:");
-            }
-        }
-    };
-
-    if (objc_getClass("VCamVerifyManager") && objc_getClass("VCamMenuVC")) {
-        doHook();
+    // Hook NSURLSession dataTaskWithRequest:completionHandler:
+    Class sessionClass = [NSURLSession class];
+    SEL sel = @selector(dataTaskWithRequest:completionHandler:);
+    Method m = class_getInstanceMethod(sessionClass, sel);
+    if (m) {
+        orig_dataTaskWithRequest = (void *)method_setImplementation(m, (IMP)h_dataTaskWithRequest);
+        NSLog(@"[VCAM] Hooked NSURLSession dataTaskWithRequest");
     } else {
-        void (^check)(void);
-        __weak typeof(check) weakCheck;
-        check = ^{
-            if (objc_getClass("VCamVerifyManager") && objc_getClass("VCamMenuVC")) {
-                doHook();
-                NSLog(@"[VCAM] Hooks ready");
-            } else {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-                    dispatch_get_main_queue(), weakCheck);
-            }
-        };
-        weakCheck = check;
-        dispatch_async(dispatch_get_main_queue(), check);
+        NSLog(@"[VCAM] FAILED to hook NSURLSession");
     }
 
-    // 自动恢复上次激活状态
-    if ([[NSUserDefaults standardUserDefaults] boolForKey:@"vcam_vip_unlocked"]) {
-        NSString *kami = [[NSUserDefaults standardUserDefaults] stringForKey:@"vcam_verified_kami"];
-        if (kami) {
-            g_vipActive = YES;
-            g_kami = [kami copy];
-            NSLog(@"[VCAM] 已恢复 VIP 状态: %@", kami);
-        }
-    }
-
-    NSLog(@"[VCAM] VCamKamiHook v7 Ready");
+    NSLog(@"[VCAM] VCamKamiHook v8 Ready");
 }
