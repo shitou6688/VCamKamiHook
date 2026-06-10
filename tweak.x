@@ -103,6 +103,46 @@ static void saveVIPState(NSString *kami, NSString *vipTimestamp) {
 
 #pragma mark - VIP 解锁 UI（复刻原始逻辑）
 
+static void unlockVIPMenuVC(id menuVC) {
+    @try {
+        // authStatusLabel
+        id authLabel = [menuVC valueForKey:@"authStatusLabel"];
+        if (authLabel && [authLabel respondsToSelector:@selector(setText:)]) {
+            [authLabel performSelector:@selector(setText:) withObject:@"已授权"];
+            if ([authLabel respondsToSelector:@selector(setTextColor:)]) {
+                [authLabel performSelector:@selector(setTextColor:) withObject:[UIColor greenColor]];
+            }
+            NSLog(@"[VCAM] authStatusLabel -> 已授权");
+        }
+
+        // 按钮全部启用
+        NSArray *btnNames = @[@"btnSound", @"btnMirror", @"btnPhotoReplacement",
+                               @"btnReplacement", @"btnRotate", @"btnLoop"];
+        for (NSString *name in btnNames) {
+            @try {
+                id btn = [menuVC valueForKey:name];
+                if (btn && [btn respondsToSelector:@selector(setEnabled:)]) {
+                    [btn performSelector:@selector(setEnabled:) withObject:@YES];
+                    if ([btn respondsToSelector:@selector(setAlpha:)]) {
+                        [btn performSelector:@selector(setAlpha:) withObject:@(1.0)];
+                    }
+                    NSLog(@"[VCAM] %@ enabled", name);
+                }
+            } @catch (NSException *e) {
+                NSLog(@"[VCAM] %@ not found: %@", name, e);
+            }
+        }
+
+        // refreshUIStates
+        if ([menuVC respondsToSelector:@selector(refreshUIStates)]) {
+            [menuVC performSelector:@selector(refreshUIStates)];
+            NSLog(@"[VCAM] refreshUIStates");
+        }
+    } @catch (NSException *e) {
+        NSLog(@"[VCAM] unlockVIPMenuVC 异常: %@", e);
+    }
+}
+
 static void unlockVIP(NSString *kami) {
     NSLog(@"[VCAM] VIP fully unlocked");
 
@@ -110,46 +150,61 @@ static void unlockVIP(NSString *kami) {
 
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
-            // 1. VCamMenuVC.sharedInstance.refreshUIStates
             Class menuClass = objc_getClass("VCamMenuVC");
+
+            // 方法1: sharedInstance
             if (menuClass && [menuClass respondsToSelector:@selector(sharedInstance)]) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
                 id menuVC = [menuClass performSelector:@selector(sharedInstance)];
 #pragma clang diagnostic pop
                 if (menuVC) {
-                    // authStatusLabel
-                    id authLabel = [menuVC valueForKey:@"authStatusLabel"];
-                    if (authLabel && [authLabel respondsToSelector:@selector(setText:)]) {
-                        [authLabel performSelector:@selector(setText:) withObject:@"已授权"];
-                        if ([authLabel respondsToSelector:@selector(setTextColor:)]) {
-                            [authLabel performSelector:@selector(setTextColor:) withObject:[UIColor greenColor]];
-                        }
-                        NSLog(@"[VCAM] authStatusLabel -> 已授权");
-                    }
-
-                    // 按钮全部启用
-                    NSArray *btnNames = @[@"btnSound", @"btnMirror", @"btnPhotoReplacement",
-                                           @"btnReplacement", @"btnRotate", @"btnLoop"];
-                    for (NSString *name in btnNames) {
-                        id btn = [menuVC valueForKey:name];
-                        if (btn && [btn respondsToSelector:@selector(setEnabled:)]) {
-                            [btn performSelector:@selector(setEnabled:) withObject:@YES];
-                            if ([btn respondsToSelector:@selector(setAlpha:)]) {
-                                [btn performSelector:@selector(setAlpha:) withObject:@(1.0)];
-                            }
-                        }
-                    }
-
-                    // refreshUIStates
-                    if ([menuVC respondsToSelector:@selector(refreshUIStates)]) {
-                        [menuVC performSelector:@selector(refreshUIStates)];
-                    }
-                    NSLog(@"[VCAM] VCamMenuVC buttons enabled + refreshUIStates");
+                    NSLog(@"[VCAM] found VCamMenuVC via sharedInstance");
+                    unlockVIPMenuVC(menuVC);
                 }
             }
 
-            // 2. showToast
+            // 方法2: 遍历 window / VC 层级找 VCamMenuVC 实例
+            UIApplication *app = [UIApplication sharedApplication];
+            for (UIWindow *window in app.windows) {
+                UIViewController *rootVC = window.rootViewController;
+                if (!rootVC) continue;
+
+                // 递归查找 VCamMenuVC
+                void (^findMenuVC)(UIViewController *) = ^(UIViewController *vc) {
+                    if (!vc) return;
+                    if ([vc isKindOfClass:menuClass]) {
+                        NSLog(@"[VCAM] found VCamMenuVC via view hierarchy: %@", vc);
+                        unlockVIPMenuVC(vc);
+                    }
+                    // child VCs
+                    if ([vc respondsToSelector:@selector(childViewControllers)]) {
+                        for (UIViewController *child in vc.childViewControllers) {
+                            findMenuVC(child);
+                        }
+                    }
+                    // presented
+                    if (vc.presentedViewController) {
+                        findMenuVC(vc.presentedViewController);
+                    }
+                    // navigation
+                    if ([vc isKindOfClass:[UINavigationController class]]) {
+                        for (UIViewController *child in ((UINavigationController *)vc).viewControllers) {
+                            findMenuVC(child);
+                        }
+                    }
+                    // tab bar
+                    if ([vc isKindOfClass:[UITabBarController class]]) {
+                        for (UIViewController *child in ((UITabBarController *)vc).viewControllers) {
+                            findMenuVC(child);
+                        }
+                    }
+                };
+
+                findMenuVC(rootVC);
+            }
+
+            // showToast
             Class verifyClass = objc_getClass("VCamVerifyManager");
             if (verifyClass && [verifyClass respondsToSelector:@selector(sharedInstance)]) {
 #pragma clang diagnostic push
