@@ -195,7 +195,7 @@ static void h_requestAPIWithAction(id self, SEL _cmd, NSString *action, NSString
     [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     [req setValue:@"TrollInstallerX/1.0" forHTTPHeaderField:@"User-Agent"];
     
-    [[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         if (error) {
             NSLog(@"[VCAM] Network error: %@", error.localizedDescription);
             if (completion) completion(@{@"code": @(-1), @"msg": @"网络错误"});
@@ -225,7 +225,8 @@ static void h_requestAPIWithAction(id self, SEL _cmd, NSString *action, NSString
         }
         
         if (completion) completion(result);
-    }].resume];
+    }];
+    [task resume];
 }
 
 #pragma mark - Auto-restore VIP on launch
