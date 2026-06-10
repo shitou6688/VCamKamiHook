@@ -4,7 +4,7 @@
  * 
  * 功能：
  * 1. 拦截 requestAPIWithAction，成功后保存卡密到 NSUserDefaults
- * 2. 启动时自动恢复已保存的卡密
+ * 2. 启动时用 orig 函数指针直接恢复卡密（避免递归）
  */
 
 #import <Foundation/Foundation.h>
@@ -13,8 +13,10 @@
 #import <objc/message.h>
 
 static void (*orig_requestAPI)(id, SEL, NSString*, NSString*, BOOL, void(^)(NSDictionary*));
+static SEL g_sel = NULL;
 
 static void h_requestAPI(id self, SEL _cmd, NSString *action, NSString *kami, BOOL isHeartbeat, void(^completion)(NSDictionary*)) {
+    // 调原始（v36 的 hook 或 App 原始方法）
     orig_requestAPI(self, _cmd, action, kami, isHeartbeat, ^(NSDictionary *result) {
         if (result && [result[@"code"] integerValue] == 0 && kami.length > 0) {
             [[NSUserDefaults standardUserDefaults] setObject:kami forKey:@"vcam_saved_kami"];
@@ -31,23 +33,25 @@ static void kami_mem_init(void) {
     
     Class cls = objc_getClass("VCamVerifyManager");
     if (cls) {
-        SEL sel = NSSelectorFromString(@"requestAPIWithAction:kami:isHeartbeat:completion:");
-        Method m = class_getInstanceMethod(cls, sel);
+        g_sel = NSSelectorFromString(@"requestAPIWithAction:kami:isHeartbeat:completion:");
+        Method m = class_getInstanceMethod(cls, g_sel);
         if (m) {
             orig_requestAPI = (void*)method_setImplementation(m, (IMP)h_requestAPI);
-            NSLog(@"[KamiMem] Hooked requestAPI");
+            NSLog(@"[KamiMem] Hooked requestAPI, orig=%p", orig_requestAPI);
         }
     }
     
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+    // 启动时恢复 - 用 orig 函数指针直接调用，不走 hook
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
         NSString *saved = [[NSUserDefaults standardUserDefaults] stringForKey:@"vcam_saved_kami"];
-        if (saved) {
+        if (saved && orig_requestAPI) {
             NSLog(@"[KamiMem] Restoring kami: %@", saved);
             Class cls2 = objc_getClass("VCamVerifyManager");
             if (cls2) {
                 id vm = [cls2 performSelector:@selector(sharedInstance)];
                 if (vm) {
-                    ((void(*)(id,SEL,NSString*,NSString*,BOOL,void(^)(NSDictionary*)))objc_msgSend)(vm, NSSelectorFromString(@"requestAPIWithAction:kami:isHeartbeat:completion:"), @"check", saved, NO, ^(NSDictionary *result) {
+                    // 直接用 orig 函数指针调用，绕过 hook，避免递归
+                    orig_requestAPI(vm, g_sel, @"use_kami", saved, NO, ^(NSDictionary *result) {
                         NSLog(@"[KamiMem] Restore result: %@", result);
                     });
                 }
