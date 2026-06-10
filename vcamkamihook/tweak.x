@@ -95,19 +95,20 @@ static void forceVIPActive(void) {
                 if (!root) continue;
                 
                 // 递归查找
-                UIViewController *findVC(UIViewController *vc) {
-                    if (!vc) return nil;
-                    if ([vc isKindOfClass:NSClassFromString(@"VCamMenuVC")]) return vc;
-                    UIViewController *found = findVC(vc.presentedViewController);
+            UIViewController * (^findVC)(UIViewController *);
+            findVC = ^(UIViewController *vc) {
+                if (!vc) return (UIViewController *)nil;
+                if ([vc isKindOfClass:NSClassFromString(@"VCamMenuVC")]) return vc;
+                UIViewController *found = findVC(vc.presentedViewController);
+                if (found) return found;
+                for (UIViewController *child in vc.childViewControllers) {
+                    found = findVC(child);
                     if (found) return found;
-                    for (UIViewController *child in vc.childViewControllers) {
-                        found = findVC(child);
-                        if (found) return found;
-                    }
-                    return nil;
                 }
-                
-                menuVC = findVC(root);
+                return (UIViewController *)nil;
+            };
+            
+            menuVC = findVC(root);
                 if (menuVC) break;
             }
             
