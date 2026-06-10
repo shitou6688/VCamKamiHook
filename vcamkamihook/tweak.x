@@ -1,5 +1,6 @@
 /**
- * VCamKamiHook v17.4 - 加上 UI 激活
+ * VCamKamiHook v17.5 - 简化 UI 激活，修复闪退
+ * 修复：递归 block 需要 __block 声明
  */
 
 #import <Foundation/Foundation.h>
@@ -9,74 +10,72 @@
 
 static void (*orig_requestAPI)(id, SEL, NSString *, NSString *, BOOL, void (^)(NSDictionary *));
 
+// 简单递归查找 VC
+static UIViewController* findMenuVC(UIViewController *root) {
+    if (!root) return nil;
+    if ([root isKindOfClass:NSClassFromString(@"VCamMenuVC")]) return root;
+    if (root.presentedViewController) {
+        UIViewController *found = findMenuVC(root.presentedViewController);
+        if (found) return found;
+    }
+    for (UIViewController *child in root.childViewControllers) {
+        UIViewController *found = findMenuVC(child);
+        if (found) return found;
+    }
+    return nil;
+}
+
 static void activateVIPUI(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
+            UIViewController *menuVC = nil;
             for (UIWindow *window in [UIApplication sharedApplication].windows) {
-                UIViewController *rootVC = window.rootViewController;
-                if (!rootVC) continue;
-                
-                __block UIViewController *found = nil;
-                void (^findVC)(UIViewController *) = ^(UIViewController *vc) {
-                    if (found) return;
-                    if ([vc isKindOfClass:NSClassFromString(@"VCamMenuVC")]) {
-                        found = vc;
-                        return;
-                    }
-                    if (vc.presentedViewController) {
-                        findVC(vc.presentedViewController);
-                    }
-                    for (UIViewController *child in vc.childViewControllers) {
-                        findVC(child);
-                        if (found) return;
-                    }
-                };
-                findVC(rootVC);
-                
-                if (!found) continue;
-                
-                NSLog(@"[VCAM] 找到 VCamMenuVC, 激活VIP");
-                
-                // authStatusLabel
-                @try {
-                    id label = [found valueForKey:@"authStatusLabel"];
-                    if (label && [label isKindOfClass:[UILabel class]]) {
-                        [(UILabel *)label setText:@"已激活"];
-                        [(UILabel *)label setTextColor:[UIColor greenColor]];
-                    }
-                } @catch (NSException *e) {}
-                
-                // 启用按钮
-                for (NSString *name in @[@"btnLoop", @"btnSound", @"btnRotate",
-                                         @"btnMirror", @"btnReplacement", @"btnPhotoReplacement"]) {
-                    @try {
-                        id btn = [found valueForKey:name];
-                        if (btn && [btn isKindOfClass:[UIButton class]]) {
-                            [(UIButton *)btn setEnabled:YES];
-                            [(UIButton *)btn setAlpha:1.0];
-                        }
-                    } @catch (NSException *e) {}
-                }
-                
-                // refreshUIStates
-                @try {
-                    SEL sel = NSSelectorFromString(@"refreshUIStates");
-                    if ([found respondsToSelector:sel]) {
-                        ((void(*)(id, SEL))objc_msgSend)(found, sel);
-                    }
-                } @catch (NSException *e) {}
-                
-                // showToast
-                @try {
-                    SEL sel = NSSelectorFromString(@"showToast:");
-                    if ([found respondsToSelector:sel]) {
-                        ((void(*)(id, SEL, id))objc_msgSend)(found, sel, @"激活成功");
-                    }
-                } @catch (NSException *e) {}
-                
-                NSLog(@"[VCAM] VIP UI 激活完成");
-                break;
+                menuVC = findMenuVC(window.rootViewController);
+                if (menuVC) break;
             }
+            if (!menuVC) {
+                NSLog(@"[VCAM] VCamMenuVC 未找到");
+                return;
+            }
+            
+            NSLog(@"[VCAM] 找到 VCamMenuVC, 激活VIP");
+            
+            // authStatusLabel
+            @try {
+                UILabel *label = [menuVC valueForKey:@"authStatusLabel"];
+                if (label && [label isKindOfClass:[UILabel class]]) {
+                    label.text = @"已激活";
+                    label.textColor = [UIColor greenColor];
+                }
+            } @catch (NSException *e) {}
+            
+            // 启用按钮
+            for (NSString *name in @[@"btnLoop", @"btnSound", @"btnRotate",
+                                     @"btnMirror", @"btnReplacement", @"btnPhotoReplacement"]) {
+                @try {
+                    UIButton *btn = [menuVC valueForKey:name];
+                    if (btn && [btn isKindOfClass:[UIButton class]]) {
+                        btn.enabled = YES;
+                        btn.alpha = 1.0;
+                    }
+                } @catch (NSException *e) {}
+            }
+            
+            // refreshUIStates
+            @try {
+                if ([menuVC respondsToSelector:@selector(refreshUIStates)]) {
+                    ((void(*)(id, SEL))objc_msgSend)(menuVC, @selector(refreshUIStates));
+                }
+            } @catch (NSException *e) {}
+            
+            // showToast
+            @try {
+                if ([menuVC respondsToSelector:@selector(showToast:)]) {
+                    ((void(*)(id, SEL, id))objc_msgSend)(menuVC, @selector(showToast:), @"激活成功");
+                }
+            } @catch (NSException *e) {}
+            
+            NSLog(@"[VCAM] VIP UI 激活完成");
         } @catch (NSException *e) {
             NSLog(@"[VCAM] UI操作异常: %@", e);
         }
@@ -91,9 +90,8 @@ static void h_requestAPI(id self, SEL _cmd,
     
     NSString *udid = @"unknown";
     @try {
-        SEL sel = NSSelectorFromString(@"getDeviceID");
-        if ([self respondsToSelector:sel]) {
-            id ret = ((id(*)(id, SEL))objc_msgSend)(self, sel);
+        if ([self respondsToSelector:@selector(getDeviceID)]) {
+            id ret = [self performSelector:@selector(getDeviceID)];
             if ([ret isKindOfClass:[NSString class]] && [(NSString *)ret length] > 0) {
                 udid = (NSString *)ret;
             }
@@ -131,11 +129,8 @@ static void h_requestAPI(id self, SEL _cmd,
             NSLog(@"[VCAM] 返回: %@", json);
             
             if (json && [json[@"code"] integerValue] == 0) {
-                // 保存状态
                 [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"vcam_vip_unlocked"];
                 [[NSUserDefaults standardUserDefaults] synchronize];
-                
-                // 激活 UI
                 activateVIPUI();
             }
             
@@ -146,7 +141,7 @@ static void h_requestAPI(id self, SEL _cmd,
 
 __attribute__((constructor))
 static void vcam_kami_init(void) {
-    NSLog(@"[VCAM] === v17.4 ===");
+    NSLog(@"[VCAM] === v17.5 ===");
     
     Class vmClass = objc_getClass("VCamVerifyManager");
     if (vmClass) {
