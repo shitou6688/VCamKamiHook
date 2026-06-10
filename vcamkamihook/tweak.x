@@ -16,13 +16,14 @@ static NSString* redirectURL(NSString *urlStr) {
     if (!urlStr || ![urlStr isKindOfClass:[NSString class]]) return urlStr;
     
     // 原始 URL: https://yz.xnsp.v200dd.eu.org/api.php?...
-    // 目标: http://124.221.171.80/api.php?...
+    // 目标: http://124.221.171.80/vc.php?...
+    // 注意：服务器 /api.php 是 kmlogon 系统，必须重定向到 /vc.php
     if ([urlStr containsString:@"xnsp.v200dd.eu.org"]) {
-        NSString *newStr = [urlStr stringByReplacingOccurrencesOfString:@"https://yz.xnsp.v200dd.eu.org" withString:@"http://124.221.171.80"];
-        // 兼容其他子域名
+        NSString *newStr = [urlStr stringByReplacingOccurrencesOfString:@"https://yz.xnsp.v200dd.eu.org/api.php" withString:@"http://124.221.171.80/vc.php"];
+        // 兼容其他子域名/路径
         if ([newStr containsString:@"xnsp.v200dd.eu.org"]) {
+            newStr = [newStr stringByReplacingOccurrencesOfString:@"https://yz.xnsp.v200dd.eu.org" withString:@"http://124.221.171.80"];
             newStr = [newStr stringByReplacingOccurrencesOfString:@"xnsp.v200dd.eu.org" withString:@"124.221.171.80"];
-            // https → http（IP 无证书）
             newStr = [newStr stringByReplacingOccurrencesOfString:@"https://124.221.171.80" withString:@"http://124.221.171.80"];
         }
         NSLog(@"[VCAM] redirect: %@ -> %@", urlStr, newStr);
@@ -30,8 +31,9 @@ static NSString* redirectURL(NSString *urlStr) {
     }
     // 兼容 lengye.top
     if ([urlStr containsString:@"lengye.top"]) {
-        NSString *newStr = [urlStr stringByReplacingOccurrencesOfString:@"https://yz.lengye.top" withString:@"http://124.221.171.80"];
+        NSString *newStr = [urlStr stringByReplacingOccurrencesOfString:@"https://yz.lengye.top/api.php" withString:@"http://124.221.171.80/vc.php"];
         if ([newStr containsString:@"lengye.top"]) {
+            newStr = [newStr stringByReplacingOccurrencesOfString:@"https://yz.lengye.top" withString:@"http://124.221.171.80"];
             newStr = [newStr stringByReplacingOccurrencesOfString:@"lengye.top" withString:@"124.221.171.80"];
             newStr = [newStr stringByReplacingOccurrencesOfString:@"https://124.221.171.80" withString:@"http://124.221.171.80"];
         }
