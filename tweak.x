@@ -1,59 +1,58 @@
 /**
- * VCamKamiHook v28 - URL 重定向版（模仿 v28 同行完美破解方案）
+ * VCamKamiHook v28.1 - URL 重定向版
  * 
- * 方案：hook NSURL +URLWithString:
- * 把 xnsp.v200dd.eu.org 重定向到我们服务器
- * App 自己处理所有逻辑（签名、请求、响应、VIP激活）
- * 
- * 不需要 hook requestAPIWithAction、NSUserDefaults、UI 等
+ * hook NSURL +URLWithString:
+ * 把 https://yz.xnsp.v200dd.eu.org 重定向到 http://124.221.171.80
+ * App 自己处理所有逻辑
  */
 
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
-#import <objc/message.h>
 
 static NSURL* (*orig_URLWithString)(id, SEL, NSString *);
 static NSURL* (*orig_URLWithStrRel)(id, SEL, NSString *, NSURL *);
 
-static NSURL* h_URLWithString(id self, SEL _cmd, NSString *urlStr) {
-    if (urlStr && [urlStr isKindOfClass:[NSString class]]) {
-        // 重定向原始 API 域名到我们服务器
-        if ([urlStr containsString:@"xnsp.v200dd.eu.org"]) {
-            NSString *newStr = [urlStr stringByReplacingOccurrencesOfString:@"xnsp.v200dd.eu.org" withString:@"124.221.171.80"];
-            NSLog(@"[VCAM] redirect: %@ -> %@", urlStr, newStr);
-            return orig_URLWithString(self, _cmd, newStr);
+static NSString* redirectURL(NSString *urlStr) {
+    if (!urlStr || ![urlStr isKindOfClass:[NSString class]]) return urlStr;
+    
+    // 原始 URL: https://yz.xnsp.v200dd.eu.org/api.php?...
+    // 目标: http://124.221.171.80/api.php?...
+    if ([urlStr containsString:@"xnsp.v200dd.eu.org"]) {
+        NSString *newStr = [urlStr stringByReplacingOccurrencesOfString:@"https://yz.xnsp.v200dd.eu.org" withString:@"http://124.221.171.80"];
+        // 兼容其他子域名
+        if ([newStr containsString:@"xnsp.v200dd.eu.org"]) {
+            newStr = [newStr stringByReplacingOccurrencesOfString:@"xnsp.v200dd.eu.org" withString:@"124.221.171.80"];
+            // https → http（IP 无证书）
+            newStr = [newStr stringByReplacingOccurrencesOfString:@"https://124.221.171.80" withString:@"http://124.221.171.80"];
         }
-        // 兼容其他可能的域名
-        if ([urlStr containsString:@"vcam.lengye.top"]) {
-            NSString *newStr = [urlStr stringByReplacingOccurrencesOfString:@"vcam.lengye.top" withString:@"124.221.171.80"];
-            NSLog(@"[VCAM] redirect: %@ -> %@", urlStr, newStr);
-            return orig_URLWithString(self, _cmd, newStr);
-        }
+        NSLog(@"[VCAM] redirect: %@ -> %@", urlStr, newStr);
+        return newStr;
     }
-    return orig_URLWithString(self, _cmd, urlStr);
+    // 兼容 lengye.top
+    if ([urlStr containsString:@"lengye.top"]) {
+        NSString *newStr = [urlStr stringByReplacingOccurrencesOfString:@"https://yz.lengye.top" withString:@"http://124.221.171.80"];
+        if ([newStr containsString:@"lengye.top"]) {
+            newStr = [newStr stringByReplacingOccurrencesOfString:@"lengye.top" withString:@"124.221.171.80"];
+            newStr = [newStr stringByReplacingOccurrencesOfString:@"https://124.221.171.80" withString:@"http://124.221.171.80"];
+        }
+        NSLog(@"[VCAM] redirect: %@ -> %@", urlStr, newStr);
+        return newStr;
+    }
+    return urlStr;
+}
+
+static NSURL* h_URLWithString(id self, SEL _cmd, NSString *urlStr) {
+    return orig_URLWithString(self, _cmd, redirectURL(urlStr));
 }
 
 static NSURL* h_URLWithStrRel(id self, SEL _cmd, NSString *urlStr, NSURL *baseURL) {
-    if (urlStr && [urlStr isKindOfClass:[NSString class]]) {
-        if ([urlStr containsString:@"xnsp.v200dd.eu.org"]) {
-            NSString *newStr = [urlStr stringByReplacingOccurrencesOfString:@"xnsp.v200dd.eu.org" withString:@"124.221.171.80"];
-            NSLog(@"[VCAM] redirect: %@ -> %@", urlStr, newStr);
-            return orig_URLWithStrRel(self, _cmd, newStr, baseURL);
-        }
-        if ([urlStr containsString:@"vcam.lengye.top"]) {
-            NSString *newStr = [urlStr stringByReplacingOccurrencesOfString:@"vcam.lengye.top" withString:@"124.221.171.80"];
-            NSLog(@"[VCAM] redirect: %@ -> %@", urlStr, newStr);
-            return orig_URLWithStrRel(self, _cmd, newStr, baseURL);
-        }
-    }
-    return orig_URLWithStrRel(self, _cmd, urlStr, baseURL);
+    return orig_URLWithStrRel(self, _cmd, redirectURL(urlStr), baseURL);
 }
 
 __attribute__((constructor))
 static void init(void) {
-    NSLog(@"[VCAM] === v28 URL redirect ===");
+    NSLog(@"[VCAM] === v28.1 URL redirect ===");
     
-    // Hook NSURL +URLWithString:
     Class nsurlClass = [NSURL class];
     Method m1 = class_getClassMethod(nsurlClass, @selector(URLWithString:));
     if (m1) {
@@ -61,7 +60,6 @@ static void init(void) {
         NSLog(@"[VCAM] Hooked URLWithString:");
     }
     
-    // Hook NSURL +URLWithString:relativeToURL:
     Method m2 = class_getClassMethod(nsurlClass, @selector(URLWithString:relativeToURL:));
     if (m2) {
         orig_URLWithStrRel = (void *)method_setImplementation(m2, (IMP)h_URLWithStrRel);
