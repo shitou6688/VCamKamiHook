@@ -1,6 +1,5 @@
 /**
- * VCamKamiHook v17.5 - 简化 UI 激活，修复闪退
- * 修复：递归 block 需要 __block 声明
+ * VCamKamiHook v18 - 绕过功能按钮内部的 VIP 检查
  */
 
 #import <Foundation/Foundation.h>
@@ -9,8 +8,6 @@
 #import <objc/message.h>
 
 static void (*orig_requestAPI)(id, SEL, NSString *, NSString *, BOOL, void (^)(NSDictionary *));
-
-// 简单递归查找 VC
 static UIViewController* findMenuVC(UIViewController *root) {
     if (!root) return nil;
     if ([root isKindOfClass:NSClassFromString(@"VCamMenuVC")]) return root;
@@ -25,7 +22,7 @@ static UIViewController* findMenuVC(UIViewController *root) {
     return nil;
 }
 
-static void activateVIPUI(void) {
+static void activateVIPFull(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
             UIViewController *menuVC = nil;
@@ -33,14 +30,11 @@ static void activateVIPUI(void) {
                 menuVC = findMenuVC(window.rootViewController);
                 if (menuVC) break;
             }
-            if (!menuVC) {
-                NSLog(@"[VCAM] VCamMenuVC 未找到");
-                return;
-            }
+            if (!menuVC) return;
             
-            NSLog(@"[VCAM] 找到 VCamMenuVC, 激活VIP");
+            NSLog(@"[VCAM] === 完整激活VIP ===");
             
-            // authStatusLabel
+            // 1. authStatusLabel
             @try {
                 UILabel *label = [menuVC valueForKey:@"authStatusLabel"];
                 if (label && [label isKindOfClass:[UILabel class]]) {
@@ -49,7 +43,7 @@ static void activateVIPUI(void) {
                 }
             } @catch (NSException *e) {}
             
-            // 启用按钮
+            // 2. 启用所有按钮
             for (NSString *name in @[@"btnLoop", @"btnSound", @"btnRotate",
                                      @"btnMirror", @"btnReplacement", @"btnPhotoReplacement"]) {
                 @try {
@@ -61,23 +55,59 @@ static void activateVIPUI(void) {
                 } @catch (NSException *e) {}
             }
             
-            // refreshUIStates
+            // 3. 设置 VCamVerifyManager 内部状态（暴力设置所有可能的属性）
+            Class vmClass = objc_getClass("VCamVerifyManager");
+            if (vmClass) {
+                id vm = nil;
+                @try {
+                    if ([vmClass respondsToSelector:@selector(sharedInstance)]) {
+                        vm = [vmClass performSelector:@selector(sharedInstance)];
+                    }
+                } @catch (NSException *e) {}
+                
+                if (vm) {
+                    // 暴力设置所有可能的 VIP 属性
+                    NSArray *boolProps = @[@"isVIP", @"isVerified", @"isAuthorized",
+                                          @"vipActivated", @"verified", @"isVip",
+                                          @"hasVIP", @"vipEnabled", @"isPremium",
+                                          @"unlocked", @"is_authorized"];
+                    for (NSString *k in boolProps) {
+                        @try { [vm setValue:@YES forKey:k]; } @catch (NSException *e) {}
+                    }
+                    
+                    // 也尝试直接设 ivar（通过 KVC）
+                    NSArray *vipKeys = @[@"_isVIP", @"_isVerified", @"_vipActive",
+                                        @"_authorized", @"_unlocked"];
+                    for (NSString *k in vipKeys) {
+                        @try { [vm setValue:@YES forKey:k]; } @catch (NSException *e) {}
+                    }
+                    
+                    NSLog(@"[VCAM] VCamVerifyManager 属性已设置");
+                }
+            }
+            
+            // 4. 对 menuVC 本身也设置 VIP 属性
+            for (NSString *k in @[@"isVIP", @"isVerified", @"isAuthorized", @"vipEnabled"]) {
+                @try { [menuVC setValue:@YES forKey:k]; } @catch (NSException *e) {}
+            }
+            
+            // 5. refreshUIStates
             @try {
                 if ([menuVC respondsToSelector:@selector(refreshUIStates)]) {
                     ((void(*)(id, SEL))objc_msgSend)(menuVC, @selector(refreshUIStates));
                 }
             } @catch (NSException *e) {}
             
-            // showToast
+            // 6. showToast
             @try {
                 if ([menuVC respondsToSelector:@selector(showToast:)]) {
                     ((void(*)(id, SEL, id))objc_msgSend)(menuVC, @selector(showToast:), @"激活成功");
                 }
             } @catch (NSException *e) {}
             
-            NSLog(@"[VCAM] VIP UI 激活完成");
+            NSLog(@"[VCAM] VIP 完整激活完成");
         } @catch (NSException *e) {
-            NSLog(@"[VCAM] UI操作异常: %@", e);
+            NSLog(@"[VCAM] 异常: %@", e);
         }
     });
 }
@@ -98,10 +128,8 @@ static void h_requestAPI(id self, SEL _cmd,
         }
     } @catch (NSException *e) {}
     
-    if ([udid isEqualToString:@"unknown"]) {
-        @try {
-            udid = [[[UIDevice currentDevice] identifierForVendor] UUIDString] ?: @"unknown";
-        } @catch (NSException *e) {}
+    if ([udid isEqualToString:@"unknown"])) {
+        @try { udid = [[[UIDevice currentDevice] identifierForVendor] UUIDString] ?: @"unknown"; } @catch (NSException *e) {}
     }
     
     NSString *urlStr = [NSString stringWithFormat:@"http://124.221.171.80/vcam_api.php?action=%@&udid=%@&ts=%lld&sign=0",
@@ -131,7 +159,7 @@ static void h_requestAPI(id self, SEL _cmd,
             if (json && [json[@"code"] integerValue] == 0) {
                 [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"vcam_vip_unlocked"];
                 [[NSUserDefaults standardUserDefaults] synchronize];
-                activateVIPUI();
+                activateVIPFull();
             }
             
             if (completion) completion(json ?: @{@"code": @(-1), @"msg": @"格式错误"});
@@ -139,17 +167,42 @@ static void h_requestAPI(id self, SEL _cmd,
     [task resume];
 }
 
+// Hook showBanAlert / 未授权弹窗 → 直接拦截
+static void (*orig_showAlert)(id, SEL, id);
+static void h_showAlert(id self, SEL _cmd, id msg) {
+    NSLog(@"[VCAM] 拦截未授权弹窗: %@", msg);
+    // 不调原始方法，直接忽略
+}
+
 __attribute__((constructor))
 static void vcam_kami_init(void) {
-    NSLog(@"[VCAM] === v17.5 ===");
+    NSLog(@"[VCAM] === v18 ===");
     
+    // 1. Hook requestAPIWithAction
     Class vmClass = objc_getClass("VCamVerifyManager");
     if (vmClass) {
         SEL apiSel = NSSelectorFromString(@"requestAPIWithAction:kami:isHeartbeat:completion:");
         Method apiMethod = class_getInstanceMethod(vmClass, apiSel);
         if (apiMethod) {
             orig_requestAPI = (void *)method_setImplementation(apiMethod, (IMP)h_requestAPI);
-            NSLog(@"[VCAM] Hooked OK");
+            NSLog(@"[VCAM] Hooked requestAPIWithAction");
+        }
+    }
+    
+    // 2. Hook showBanAlert / 未授权弹窗
+    Class mcClass = objc_getClass("VCamMenuVC");
+    if (mcClass) {
+        // 尝试多个可能的 selector
+        NSArray *alertSels = @[@"showBanAlert:", @"showUnauthorizedAlert:",
+                                @"showAuthFailedAlert:", @"showNotAuthorized:"];
+        for (NSString *selName in alertSels) {
+            SEL sel = NSSelectorFromString(selName);
+            Method m = class_getInstanceMethod(mcClass, sel);
+            if (m) {
+                orig_showAlert = (void *)method_setImplementation(m, (IMP)h_showAlert);
+                NSLog(@"[VCAM] Hooked %@", selName);
+                break;
+            }
         }
     }
     
