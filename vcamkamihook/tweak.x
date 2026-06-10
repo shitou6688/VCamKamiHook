@@ -432,7 +432,7 @@ static void h_startVerifyProcess(id self, SEL _cmd) {
 #pragma mark - Hook: refreshUIStates → 强制已授权状态
 
 static void h_refreshUIStates(id self, SEL _cmd) {
-    forceVIPOnManager();
+    forceVIPOnTarget(self);
     if (orig_refreshUIStates) orig_refreshUIStates(self, _cmd);
 
     if (!g_vipActive) return;
