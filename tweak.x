@@ -1,9 +1,11 @@
 /**
- * VCamKamiHook v20 - URL替换 + hook功能按钮的VIP检查
+ * VCamKamiHook v21 - 完全模仿同行 vcam_kami(5)
  * 
- * 1. URL替换让App正常走验证（保留sign）
- * 2. Hook VCamMenuVC的功能方法，绕过VIP检查
- * 3. 强制设置VIP状态
+ * 关键差异（之前遗漏的）：
+ * 1. NSTimer 定时器持续刷新 VIP 状态
+ * 2. vcam_expires 用 yyyy/MM/dd HH:mm:ss 格式
+ * 3. llyKeychain 存储 vcam_kami
+ * 4. 完全替换 requestAPI，不调原始
  */
 
 #import <Foundation/Foundation.h>
@@ -41,7 +43,130 @@ static NSURL* new_URLWithString_rel(id self, SEL _cmd, NSString *string, NSURL *
     return orig_URLWithString_rel(self, _cmd, string, baseURL);
 }
 
-#pragma mark - Hook requestAPIWithAction completion，记录+强制设VIP
+#pragma mark - VIP 激活（同行完整方案）
+
+static void forceVIPActive(void) {
+    // 1. NSUserDefaults
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    [ud setBool:YES forKey:@"vcam_vip_unlocked"];
+    
+    // 2. vcam_expires 用日期格式（同行做法）
+    NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
+    [fmt setDateFormat:@"yyyy/MM/dd HH:mm:ss"];
+    NSString *expires = [fmt stringFromDate:[[NSDate date] dateByAddingTimeInterval:365*24*3600]];
+    [ud setObject:expires forKey:@"vcam_expires"];
+    [ud synchronize];
+    
+    // 3. Keychain
+    @try {
+        Class kcClass = objc_getClass("llyKeychain");
+        if (kcClass) {
+            SEL sel = @selector(setPassword:forService:account:);
+            if ([kcClass respondsToSelector:sel]) {
+                ((void(*)(id, SEL, id, id, id))objc_msgSend)(kcClass, sel, @"VCAM_VIP_ACTIVATED", @"vcam_kami", @"vcam_kami");
+            }
+        }
+    } @catch (NSException *e) {}
+    
+    // 4. VCamVerifyManager
+    @try {
+        Class vmClass = objc_getClass("VCamVerifyManager");
+        if (vmClass) {
+            id vm = [vmClass performSelector:@selector(sharedInstance)];
+            if (vm) {
+                // 设 vip 过期时间戳
+                @try { [vm setValue:@([[[NSDate date] dateByAddingTimeInterval:365*24*3600] timeIntervalSince1970]) forKey:@"vip"]; } @catch (NSException *e) {}
+                // 设 VIP 标志
+                for (NSString *k in @[@"isVIP", @"isVip", @"isVerified", @"isAuthorized",
+                                      @"vipActivated", @"hasVIP", @"vipEnabled", @"isPremium",
+                                      @"_isVIP", @"_vipActive"]) {
+                    @try { [vm setValue:@YES forKey:k]; } @catch (NSException *e) {}
+                }
+            }
+        }
+    } @catch (NSException *e) {}
+    
+    // 5. VCamMenuVC UI
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            UIViewController *menuVC = nil;
+            for (UIWindow *window in [UIApplication sharedApplication].windows) {
+                UIViewController *root = window.rootViewController;
+                if (!root) continue;
+                
+                // 递归查找
+                UIViewController *findVC(UIViewController *vc) {
+                    if (!vc) return nil;
+                    if ([vc isKindOfClass:NSClassFromString(@"VCamMenuVC")]) return vc;
+                    UIViewController *found = findVC(vc.presentedViewController);
+                    if (found) return found;
+                    for (UIViewController *child in vc.childViewControllers) {
+                        found = findVC(child);
+                        if (found) return found;
+                    }
+                    return nil;
+                }
+                
+                menuVC = findVC(root);
+                if (menuVC) break;
+            }
+            
+            if (!menuVC) return;
+            
+            // authStatusLabel
+            @try {
+                UILabel *label = [menuVC valueForKey:@"authStatusLabel"];
+                if (label && [label isKindOfClass:[UILabel class]]) {
+                    label.text = @"已激活";
+                    label.textColor = [UIColor greenColor];
+                }
+            } @catch (NSException *e) {}
+            
+            // 按钮
+            for (NSString *name in @[@"btnLoop", @"btnSound", @"btnRotate",
+                                     @"btnMirror", @"btnReplacement", @"btnPhotoReplacement"]) {
+                @try {
+                    UIButton *btn = [menuVC valueForKey:name];
+                    if (btn && [btn isKindOfClass:[UIButton class]]) {
+                        btn.enabled = YES;
+                        btn.alpha = 1.0;
+                    }
+                } @catch (NSException *e) {}
+            }
+            
+            // refreshUIStates
+            @try {
+                if ([menuVC respondsToSelector:@selector(refreshUIStates)]) {
+                    ((void(*)(id, SEL))objc_msgSend)(menuVC, @selector(refreshUIStates));
+                }
+            } @catch (NSException *e) {}
+            
+            // showToast
+            @try {
+                if ([menuVC respondsToSelector:@selector(showToast:)]) {
+                    ((void(*)(id, SEL, id))objc_msgSend)(menuVC, @selector(showToast:), @"激活成功");
+                }
+            } @catch (NSException *e) {}
+        } @catch (NSException *e) {}
+    });
+}
+
+#pragma mark - NSTimer 定时刷新（同行关键做法）
+
+static NSTimer *g_vipTimer = nil;
+
+static void startVIPTimer(void) {
+    if (g_vipTimer) return;
+    
+    g_vipTimer = [NSTimer scheduledTimerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *timer) {
+        @try {
+            forceVIPActive();
+        } @catch (NSException *e) {}
+    }];
+    NSLog(@"[VCAM] VIP 定时器已启动");
+}
+
+#pragma mark - Hook requestAPIWithAction
 
 static void (*orig_reqAPI)(id, SEL, NSString *, NSString *, BOOL, void (^)(NSDictionary *));
 
@@ -51,42 +176,25 @@ static void h_reqAPI(id self, SEL _cmd,
     
     NSLog(@"[VCAM] reqAPI: action=%@ kami=%@ heartbeat=%d", action, kami, (int)isHeartbeat);
     
-    // 调原始方法（URL已被替换），但 wrap completion
+    // 调原始方法（URL已替换）
+    // 但 wrap completion 来加 VIP 激活
     void (^wrappedCompletion)(NSDictionary *) = ^(NSDictionary *result) {
-        NSLog(@"[VCAM] reqAPI结果: %@", result);
+        NSLog(@"[VCAM] 结果: %@", result);
         
-        // 不管结果如何，强制设VIP
-        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"vcam_vip_unlocked"];
-        if (kami && kami.length > 0) {
-            [[NSUserDefaults standardUserDefaults] setObject:kami forKey:@"vcam_verified_kami"];
-        }
-        [[NSUserDefaults standardUserDefaults] synchronize];
-        
-        // 强制设置 VCamVerifyManager
-        @try {
-            Class vmClass = objc_getClass("VCamVerifyManager");
-            if (vmClass) {
-                id vm = [vmClass performSelector:@selector(sharedInstance)];
-                if (vm) {
-                    // 暴力设所有可能的 VIP 属性
-                    for (NSString *k in @[@"isVIP", @"isVerified", @"isAuthorized", @"vipActivated",
-                                          @"isVip", @"hasVIP", @"vipEnabled", @"isPremium",
-                                          @"unlocked", @"_isVIP", @"_isVerified", @"_vipActive"]) {
-                        @try { [vm setValue:@YES forKey:k]; } @catch (NSException *e) {}
-                    }
-                    // 设 vip 过期时间
-                    for (NSString *k in @[@"vip", @"vipExpiry", @"vipExpireTime", @"expiresAt"]) {
-                        @try { [vm setValue:@([[[NSDate date] dateByAddingTimeInterval:365*24*3600] timeIntervalSince1970]) forKey:k]; } @catch (NSException *e) {}
-                    }
-                    // 设 kami
-                    if (kami && kami.length > 0) {
-                        for (NSString *k in @[@"kami", @"use_kami", @"activeKami", @"currentKami"]) {
-                            @try { [vm setValue:kami forKey:k]; } @catch (NSException *e) {}
-                        }
-                    }
-                }
+        NSInteger code = [result[@"code"] integerValue];
+        if (code == 0) {
+            // 保存 kami
+            if (kami && kami.length > 0) {
+                [[NSUserDefaults standardUserDefaults] setObject:kami forKey:@"vcam_verified_kami"];
+                [[NSUserDefaults standardUserDefaults] synchronize];
             }
-        } @catch (NSException *e) {}
+            
+            // 强制激活
+            forceVIPActive();
+            
+            // 启动定时器
+            startVIPTimer();
+        }
         
         if (completion) completion(result);
     };
@@ -96,45 +204,11 @@ static void h_reqAPI(id self, SEL _cmd,
     }
 }
 
-#pragma mark - Hook 按钮 action 方法的 VIP 检查
-
-// Hook 所有可能的声音/循环等功能的 action 方法
-// 扫描 VCamMenuVC 的方法，找到 VIP 检查相关的
-
-static void scanAndHookMenuVC(void) {
-    Class mcClass = objc_getClass("VCamMenuVC");
-    if (!mcClass) return;
-    
-    unsigned int methodCount = 0;
-    Method *methods = class_copyMethodList(mcClass, &methodCount);
-    NSLog(@"[VCAM] VCamMenuVC has %d methods:", methodCount);
-    for (unsigned int i = 0; i < methodCount; i++) {
-        SEL sel = method_getName(methods[i]);
-        NSString *name = NSStringFromSelector(sel);
-        NSLog(@"[VCAM]   %@", name);
-    }
-    free(methods);
-    
-    // 也扫描 VCamVerifyManager
-    Class vmClass = objc_getClass("VCamVerifyManager");
-    if (vmClass) {
-        unsigned int vmCount = 0;
-        Method *vmMethods = class_copyMethodList(vmClass, &vmCount);
-        NSLog(@"[VCAM] VCamVerifyManager has %d methods:", vmCount);
-        for (unsigned int i = 0; i < vmCount; i++) {
-            SEL sel = method_getName(vmMethods[i]);
-            NSString *name = NSStringFromSelector(sel);
-            NSLog(@"[VCAM]   %@", name);
-        }
-        free(vmMethods);
-    }
-}
-
 #pragma mark - 初始化
 
 __attribute__((constructor))
 static void vcam_kami_init(void) {
-    NSLog(@"[VCAM] === v20 ===");
+    NSLog(@"[VCAM] === v21 ===");
     
     // 1. URL 替换
     Class nsurlClass = [NSURL class];
@@ -146,10 +220,9 @@ static void vcam_kami_init(void) {
     Method m2 = class_getClassMethod(nsurlClass, @selector(URLWithString:relativeToURL:));
     if (m2) {
         orig_URLWithString_rel = (void *)method_setImplementation(m2, (IMP)new_URLWithString_rel);
-        NSLog(@"[VCAM] Hooked URLWithString:relativeToURL:");
     }
     
-    // 2. Hook requestAPIWithAction（调原始但加 VIP 设置）
+    // 2. Hook requestAPIWithAction
     Class vmClass = objc_getClass("VCamVerifyManager");
     if (vmClass) {
         SEL apiSel = NSSelectorFromString(@"requestAPIWithAction:kami:isHeartbeat:completion:");
@@ -160,10 +233,13 @@ static void vcam_kami_init(void) {
         }
     }
     
-    // 3. 延迟扫描类方法（等 App 完全加载）
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        scanAndHookMenuVC();
-    });
+    // 3. 检查是否之前已激活，自动启动定时器
+    if ([[NSUserDefaults standardUserDefaults] boolForKey:@"vcam_vip_unlocked"]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            forceVIPActive();
+            startVIPTimer();
+        });
+    }
     
     NSLog(@"[VCAM] Ready");
 }
