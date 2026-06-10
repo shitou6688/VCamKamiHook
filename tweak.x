@@ -68,7 +68,7 @@ static id h_objectForKey(id self, SEL _cmd, NSString *key) {
 static void (*orig_vm_forwardInvocation)(id, SEL, NSInvocation *);
 static void h_vm_forwardInvocation(id self, SEL _cmd, NSInvocation *inv) {
     SEL sel;
-    [inv getSelector:&sel];
+    sel = [inv selector];
     NSString *name = NSStringFromSelector(sel);
     
     // 如果是 getter 方法（is*/has*/get*），返回 YES
