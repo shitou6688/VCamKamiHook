@@ -298,66 +298,124 @@ static void h_showBanAlert(id self, SEL _cmd, id msg) {
 
 #pragma mark - Hook: toggle 方法 → 强制设置 VIP 状态后执行原始逻辑
 
-static void forceVIPOnManager(void) {
+// 强制设置目标对象上的所有可能的 VIP 属性
+static void forceVIPOnTarget(id target) {
+    if (!target) return;
+    @try {
+        NSArray *boolKeys = @[@"isVIP", @"isVerified", @"isAuthorized",
+            @"vipActivated", @"verified", @"isVip", @"is_authorized",
+            @"hasVIP", @"vipEnabled", @"isPremium", @"unlocked"];
+        for (NSString *k in boolKeys) {
+            [target setValue:@YES forKey:k];
+        }
+        NSString *kami = g_kami ?: @"";
+        NSArray *kamiKeys = @[@"use_kami", @"kami", @"activeKami",
+            @"currentKami", @"licenseKey", @"activationCode"];
+        for (NSString *k in kamiKeys) {
+            [target setValue:kami forKey:k];
+        }
+    } @catch (NSException *e) {
+        NSLog(@"[VCAM] forceVIPOnTarget err: %@", e);
+    }
     Class vmClass = objc_getClass("VCamVerifyManager");
     if (vmClass && [vmClass respondsToSelector:@selector(sharedInstance)]) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
         id vm = [vmClass performSelector:@selector(sharedInstance)];
 #pragma clang diagnostic pop
-        if (vm) {
-            @try {
-                [vm setValue:@YES forKey:@"isVIP"];
-                [vm setValue:@YES forKey:@"isVerified"];
-                [vm setValue:@YES forKey:@"isAuthorized"];
-                [vm setValue:@YES forKey:@"vipActivated"];
-                [vm setValue:g_kami ?: @"" forKey:@"use_kami"];
-                [vm setValue:g_kami ?: @"" forKey:@"kami"];
-                [vm setValue:@YES forKey:@"verified"];
-            } @catch (NSException *e) {
-                NSLog(@"[VCAM] forceVIP err: %@", e);
-            }
-        }
+        forceVIPOnTarget(vm);
     }
 }
 
-static void h_toggleSound(id self, SEL _cmd) {
-    NSLog(@"[VCAM] toggleSound: forced VIP");
-    forceVIPOnManager();
+// 通用 toggle 处理：不调原始方法，直接翻转按钮和内部状态
+static void doToggle(id self, SEL _cmd, NSString *btnName, NSString *stateKey,
+                      void (*orig)(id, SEL)) {
+    NSLog(@"[VCAM] doToggle: %@", btnName);
+
+    forceVIPOnTarget(self);
+
+    // 找按钮并翻转
     @try {
-        id btn = [self valueForKey:@"btnSound"];
+        id btn = [self valueForKey:btnName];
         if ([btn isKindOfClass:[UIButton class]]) {
             UIButton *b = (UIButton *)btn;
             b.enabled = YES;
             b.alpha = 1.0;
+            b.selected = !b.selected;
+            if (b.selected) {
+                b.backgroundColor = [UIColor systemBlueColor];
+            } else {
+                b.backgroundColor = [UIColor colorWithWhite:0.15 alpha:1.0];
+            }
         }
-    } @catch (NSException *e) { }
-    if (orig_toggleSound) orig_toggleSound(self, _cmd);
+    } @catch (NSException *e) {
+        NSLog(@"[VCAM] toggle btn err: %@", e);
+    }
+
+    // 翻转内部功能状态
+    if (stateKey) {
+        BOOL set = NO;
+        @try {
+            id current = [self valueForKey:stateKey];
+            if ([current respondsToSelector:@selector(boolValue)]) {
+                [self setValue:@(![current boolValue]) forKey:stateKey];
+                set = YES;
+            }
+        } @catch (NSException *e) { }
+
+        if (!set) {
+            NSArray *altKeys = nil;
+            if ([btnName isEqualToString:@"btnSound"])
+                altKeys = @[@"soundEnabled", @"isSoundOn", @"soundOn", @"muteSound", @"soundMuted"];
+            else if ([btnName isEqualToString:@"btnMirror"])
+                altKeys = @[@"mirrorEnabled", @"isMirrorOn", @"mirrorOn"];
+            else if ([btnName isEqualToString:@"btnRotate"])
+                altKeys = @[@"rotateEnabled", @"isRotateOn", @"autoRotate"];
+            else if ([btnName isEqualToString:@"btnLoop"])
+                altKeys = @[@"loopEnabled", @"isLoopOn", @"videoLoop"];
+
+            if (altKeys) {
+                for (NSString *k in altKeys) {
+                    @try {
+                        id val = [self valueForKey:k];
+                        if ([val respondsToSelector:@selector(boolValue)]) {
+                            [self setValue:@(![val boolValue]) forKey:k];
+                        } else {
+                            [self setValue:@YES forKey:k];
+                        }
+                        break;
+                    } @catch (NSException *ex) { }
+                }
+            }
+        }
+    }
+
+    // 刷新 UI
+    if ([self respondsToSelector:@selector(refreshUIStates)]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        [self performSelector:@selector(refreshUIStates)];
+#pragma clang diagnostic pop
+    }
 }
 
+static void h_toggleSound(id self, SEL _cmd) {
+    doToggle(self, _cmd, @"btnSound", @"soundEnabled", orig_toggleSound);
+}
 static void h_toggleMirror(id self, SEL _cmd) {
-    forceVIPOnManager();
-    if (orig_toggleMirror) orig_toggleMirror(self, _cmd);
+    doToggle(self, _cmd, @"btnMirror", @"mirrorEnabled", orig_toggleMirror);
 }
-
 static void h_toggleRotate(id self, SEL _cmd) {
-    forceVIPOnManager();
-    if (orig_toggleRotate) orig_toggleRotate(self, _cmd);
+    doToggle(self, _cmd, @"btnRotate", @"rotateEnabled", orig_toggleRotate);
 }
-
 static void h_toggleLoop(id self, SEL _cmd) {
-    forceVIPOnManager();
-    if (orig_toggleLoop) orig_toggleLoop(self, _cmd);
+    doToggle(self, _cmd, @"btnLoop", @"loopEnabled", orig_toggleLoop);
 }
-
 static void h_togglePhotoReplacement(id self, SEL _cmd) {
-    forceVIPOnManager();
-    if (orig_togglePhotoReplacement) orig_togglePhotoReplacement(self, _cmd);
+    doToggle(self, _cmd, @"btnPhotoToggle", @"photoReplaceEnabled", orig_togglePhotoReplacement);
 }
-
 static void h_toggleReplacement(id self, SEL _cmd) {
-    forceVIPOnManager();
-    if (orig_toggleReplacement) orig_toggleReplacement(self, _cmd);
+    doToggle(self, _cmd, @"btnReplaceToggle", @"replaceEnabled", orig_toggleReplacement);
 }
 
 #pragma mark - Hook: startVerifyProcess → 如果已激活直接通过
