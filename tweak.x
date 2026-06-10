@@ -1,8 +1,11 @@
 /**
- * VCamKamiHook v22 - 暴力遍历所有 ivar + 定时器
+ * VCamKamiHook v23 - 完全模仿 kami.lengye.top/api/login 格式
  * 
- * 之前设 VIP 属性用的是猜测的 key 名，可能不对
- * 现在用 runtime 遍历 VCamVerifyManager 的所有 ivar，全部设为 VIP
+ * 同行成功的方案：
+ * - POST https://kami.lengye.top/api/login
+ * - Body: {"appkey":"H0U66ETGBFEC","card":"卡密","device_id":"设备ID"}
+ * - 返回: {"code":0,"msg":"登录成功","data":{"card":"XXX","card_type":"day","expires_at":"2026/06/12 00:43:36","duration":"1天0小时"}}
+ * - 用 expires_at 日期格式存 vcam_expires
  */
 
 #import <Foundation/Foundation.h>
@@ -26,13 +29,17 @@ static UIViewController* findMenuVC(UIViewController *root) {
     return nil;
 }
 
-static void forceVIPActive(void) {
+static void forceVIPActive(NSString *expiresAt) {
     // NSUserDefaults
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     [ud setBool:YES forKey:@"vcam_vip_unlocked"];
-    NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
-    [fmt setDateFormat:@"yyyy/MM/dd HH:mm:ss"];
-    [ud setObject:[fmt stringFromDate:[[NSDate date] dateByAddingTimeInterval:365*24*3600]] forKey:@"vcam_expires"];
+    if (expiresAt && expiresAt.length > 0) {
+        [ud setObject:expiresAt forKey:@"vcam_expires"];
+    } else {
+        NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
+        [fmt setDateFormat:@"yyyy/MM/dd HH:mm:ss"];
+        [ud setObject:[fmt stringFromDate:[[NSDate date] dateByAddingTimeInterval:365*24*3600]] forKey:@"vcam_expires"];
+    }
     [ud synchronize];
     
     // Keychain
@@ -46,61 +53,38 @@ static void forceVIPActive(void) {
         }
     } @catch (NSException *e) {}
     
-    // VCamVerifyManager - 暴力遍历所有 ivar
+    // VCamVerifyManager - 暴力设所有 ivar
     @try {
         Class vmClass = objc_getClass("VCamVerifyManager");
         if (vmClass) {
             id vm = [vmClass performSelector:@selector(sharedInstance)];
             if (vm) {
-                unsigned int ivarCount = 0;
-                Ivar *ivars = class_copyIvarList(vmClass, &ivarCount);
-                NSLog(@"[VCAM] VCamVerifyManager ivars (%d):", ivarCount);
-                for (unsigned int i = 0; i < ivarCount; i++) {
-                    const char *ivarName = ivar_getName(ivars[i]);
-                    const char *ivarType = ivar_getTypeEncoding(ivars[i]);
-                    if (!ivarName) continue;
-                    NSString *name = [NSString stringWithUTF8String:ivarName];
-                    NSString *type = ivarType ? [NSString stringWithUTF8String:ivarType] : @"";
-                    NSLog(@"[VCAM]   ivar: %@ type=%@", name, type);
-                    
-                    // 根据类型设置值
+                unsigned int count = 0;
+                Ivar *ivars = class_copyIvarList(vmClass, &count);
+                for (unsigned int i = 0; i < count; i++) {
+                    const char *name = ivar_getName(ivars[i]);
+                    const char *type = ivar_getTypeEncoding(ivars[i]);
+                    if (!name) continue;
+                    NSString *n = [NSString stringWithUTF8String:name];
+                    NSString *t = type ? [NSString stringWithUTF8String:type] : @"";
                     @try {
-                        if ([type hasPrefix:@"c"] || [type hasPrefix:@"B"]) {
-                            // BOOL / char
+                        if ([t hasPrefix:@"c"] || [t hasPrefix:@"B"]) {
                             object_setIvar(vm, ivars[i], @YES);
-                            NSLog(@"[VCAM]     -> set YES");
-                        } else if ([type hasPrefix:@"i"] || [type hasPrefix:@"l"] || [type hasPrefix:@"q"]) {
-                            // int / long / long long
-                            object_setIvar(vm, ivars[i], @1);
-                            NSLog(@"[VCAM]     -> set 1");
-                        } else if ([type hasPrefix:@"d"] || [type hasPrefix:@"f"]) {
-                            // double / float -> 设1年后时间戳
+                        } else if ([t hasPrefix:@"d"] || [t hasPrefix:@"f"]) {
                             object_setIvar(vm, ivars[i], @([[[NSDate date] dateByAddingTimeInterval:365*24*3600] timeIntervalSince1970]));
-                            NSLog(@"[VCAM]     -> set vip timestamp");
-                        } else if ([type hasPrefix:@"@"]) {
-                            // 对象类型 - 根据 ivar 名判断
-                            NSString *lower = name.lowercaseString;
-                            if ([lower containsString:@"vip"] || [lower containsString:@"auth"] ||
-                                [lower containsString:@"verify"] || [lower containsString:@"active"] ||
-                                [lower containsString:@"unlock"] || [lower containsString:@"premium"] ||
-                                [lower containsString:@"license"]) {
+                        } else if ([t hasPrefix:@"@"]) {
+                            NSString *lower = n.lowercaseString;
+                            if ([lower containsString:@"vip"] || [lower containsString:@"auth"] || [lower containsString:@"verify"] || [lower containsString:@"active"] || [lower containsString:@"unlock"]) {
                                 object_setIvar(vm, ivars[i], @YES);
-                                NSLog(@"[VCAM]     -> set @YES (VIP相关)");
-                            } else if ([lower containsString:@"kami"] || [lower containsString:@"card"] ||
-                                       [lower containsString:@"code"]) {
+                            } else if ([lower containsString:@"kami"] || [lower containsString:@"card"]) {
                                 object_setIvar(vm, ivars[i], @"VCAM_VIP_ACTIVATED");
-                                NSLog(@"[VCAM]     -> set kami string");
                             } else if ([lower containsString:@"expire"] || [lower containsString:@"expir"]) {
-                                object_setIvar(vm, ivars[i], [fmt stringFromDate:[[NSDate date] dateByAddingTimeInterval:365*24*3600]]);
-                                NSLog(@"[VCAM]     -> set expiry date");
+                                object_setIvar(vm, ivars[i], expiresAt ?: @"2099/12/31 23:59:59");
                             } else if ([lower containsString:@"status"]) {
                                 object_setIvar(vm, ivars[i], @"active");
-                                NSLog(@"[VCAM]     -> set active");
                             }
                         }
-                    } @catch (NSException *e) {
-                        NSLog(@"[VCAM]     set failed: %@", e);
-                    }
+                    } @catch (NSException *e) {}
                 }
                 free(ivars);
             }
@@ -108,10 +92,10 @@ static void forceVIPActive(void) {
     } @catch (NSException *e) {}
 }
 
-static void activateVIPUI(void) {
+static void activateVIPUI(NSString *expiresAt) {
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
-            forceVIPActive();
+            forceVIPActive(expiresAt);
             
             UIViewController *menuVC = nil;
             for (UIWindow *window in [UIApplication sharedApplication].windows) {
@@ -144,18 +128,24 @@ static void activateVIPUI(void) {
                     ((void(*)(id, SEL))objc_msgSend)(menuVC, @selector(refreshUIStates));
                 }
             } @catch (NSException *e) {}
+            
+            @try {
+                if ([menuVC respondsToSelector:@selector(showToast:)]) {
+                    ((void(*)(id, SEL, id))objc_msgSend)(menuVC, @selector(showToast:), @"激活成功");
+                }
+            } @catch (NSException *e) {}
         } @catch (NSException *e) {}
     });
 }
 
 static NSTimer *g_vipTimer = nil;
+static NSString *g_expiresAt = nil;
 
 static void startVIPTimer(void) {
     if (g_vipTimer) return;
     g_vipTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer * _Nonnull timer) {
-        forceVIPActive();
+        forceVIPActive(g_expiresAt);
     }];
-    NSLog(@"[VCAM] Timer started");
 }
 
 static void h_reqAPI(id self, SEL _cmd,
@@ -164,36 +154,42 @@ static void h_reqAPI(id self, SEL _cmd,
     
     NSLog(@"[VCAM] reqAPI: action=%@ kami=%@ heartbeat=%d", action, kami, (int)isHeartbeat);
     
-    NSString *udid = @"unknown";
+    // 获取设备 ID
+    NSString *deviceID = [[[UIDevice currentDevice] identifierForVendor] UUIDString] ?: @"unknown";
     @try {
         if ([self respondsToSelector:@selector(getDeviceID)]) {
             id ret = [self performSelector:@selector(getDeviceID)];
             if ([ret isKindOfClass:[NSString class]] && [(NSString *)ret length] > 0) {
-                udid = (NSString *)ret;
+                deviceID = (NSString *)ret;
             }
         }
     } @catch (NSException *e) {}
     
-    if ([udid isEqualToString:@"unknown"]) {
-        @try { udid = [[[UIDevice currentDevice] identifierForVendor] UUIDString] ?: @"unknown"; } @catch (NSException *e) {}
-    }
-    
-    NSString *urlStr = [NSString stringWithFormat:@"http://124.221.171.80/vcam_api.php?action=%@&udid=%@&ts=%lld&sign=0",
-        action ?: @"check", udid, (long long)[[NSDate date] timeIntervalSince1970]];
-    if (kami && kami.length > 0) {
-        urlStr = [urlStr stringByAppendingFormat:@"&kami=%@", kami];
-    }
-    
-    NSURL *url = [NSURL URLWithString:urlStr];
+    // POST 请求（同行格式）
+    NSURL *url = [NSURL URLWithString:@"http://124.221.171.80/vcam_api.php"];
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url
                                                            cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
                                                        timeoutInterval:15.0];
-    [request setHTTPMethod:@"GET"];
+    [request setHTTPMethod:@"POST"];
+    [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     [request setValue:@"TrollInstallerX/1.0" forHTTPHeaderField:@"User-Agent"];
+    
+    // Body - 模仿 kami.lengye.top/api/login 格式
+    NSDictionary *body = @{
+        @"appkey": @"H0U66ETGBFEC",
+        @"card": kami ?: @"",
+        @"device_id": deviceID,
+        @"action": action ?: @"check"
+    };
+    NSData *bodyData = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
+    [request setHTTPBody:bodyData];
+    
+    NSLog(@"[VCAM] POST body: %@", body);
     
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
         completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
             if (error) {
+                NSLog(@"[VCAM] error: %@", error.localizedDescription);
                 if (completion) completion(@{@"code": @(-1), @"msg": @"网络错误"});
                 return;
             }
@@ -202,11 +198,19 @@ static void h_reqAPI(id self, SEL _cmd,
             NSLog(@"[VCAM] result: %@", json);
             
             if (json && [json[@"code"] integerValue] == 0) {
-                if (kami && kami.length > 0) {
-                    [[NSUserDefaults standardUserDefaults] setObject:kami forKey:@"vcam_verified_kami"];
-                    [[NSUserDefaults standardUserDefaults] synchronize];
+                // 提取 expires_at（同行关键格式）
+                NSString *expiresAt = json[@"data"][@"expires_at"];
+                NSString *card = json[@"data"][@"card"];
+                
+                NSLog(@"[VCAM] expires_at=%@ card=%@", expiresAt, card);
+                
+                g_expiresAt = expiresAt;
+                
+                if (card && card.length > 0) {
+                    [[NSUserDefaults standardUserDefaults] setObject:card forKey:@"vcam_verified_kami"];
                 }
-                activateVIPUI();
+                
+                activateVIPUI(expiresAt);
                 dispatch_async(dispatch_get_main_queue(), ^{
                     startVIPTimer();
                 });
@@ -219,7 +223,7 @@ static void h_reqAPI(id self, SEL _cmd,
 
 __attribute__((constructor))
 static void vcam_kami_init(void) {
-    NSLog(@"[VCAM] === v22 ===");
+    NSLog(@"[VCAM] === v23 ===");
     
     Class vmClass = objc_getClass("VCamVerifyManager");
     if (vmClass) {
@@ -231,9 +235,12 @@ static void vcam_kami_init(void) {
         }
     }
     
+    // 自动激活
     if ([[NSUserDefaults standardUserDefaults] boolForKey:@"vcam_vip_unlocked"]) {
+        NSString *savedExpires = [[NSUserDefaults standardUserDefaults] stringForKey:@"vcam_expires"];
+        g_expiresAt = savedExpires;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            activateVIPUI();
+            activateVIPUI(savedExpires);
             startVIPTimer();
         });
     }

@@ -1,55 +1,75 @@
 <?php
 /**
- * VCam 卡密验证 API - 兼容原始 api.php 格式
+ * VCam 卡密验证 API - 兼容 kami.lengye.top/api/login 格式
  * 
- * 接口格式（与原始 yz.xnsp.v200dd.eu.org 一致）：
- * GET api.php?action=check&udid=XXX&ts=XXX&sign=XXX
- * GET api.php?action=use_kami&udid=XXX&ts=XXX&sign=XXX&kami=XXX
+ * POST api/login
+ * Body: {"appkey":"H0U66ETGBFEC","card":"卡密","device_id":"设备ID"}
  * 
- * 成功响应：{"code":0,"msg":"ok","data":{"vip":<timestamp>}}
- * 失败响应：{"code":-1,"msg":"错误信息"}
+ * 成功: {"code":0,"msg":"登录成功","data":{"card":"XXX","card_type":"day","expires_at":"2026/06/12 00:43:36","duration":"1天0小时"}}
+ * 失败: {"code":-1,"msg":"卡密不存在"}
  */
 
 header('Content-Type: application/json; charset=utf-8');
 header('Access-Control-Allow-Origin: *');
 
+// 支持 GET 和 POST
 $action = $_GET['action'] ?? '';
+$udid = $_GET['udid'] ?? '';
+$kami = $_GET['kami'] ?? '';
+$ts = $_GET['ts'] ?? '';
+$sign = $_GET['sign'] ?? '';
 
-if ($action === 'check') {
-    // check 请求：检查设备是否已激活
-    $udid = $_GET['udid'] ?? '';
-    
-    // 查询本地数据库看这个设备是否已激活
-    $kami = getKamiForDevice($udid);
-    if ($kami) {
-        echo json_encode([
-            'code' => 0,
-            'msg' => 'ok',
-            'data' => [
-                'vip' => 4102243200,
-                'kami' => $kami
-            ]
-        ]);
-    } else {
-        // 未激活也返回成功（避免 App 弹窗），但 vip 为 0
-        echo json_encode([
-            'code' => 0,
-            'msg' => 'ok',
-            'data' => [
-                'vip' => 0
-            ]
-        ]);
+// POST JSON body
+$rawInput = file_get_contents('php://input');
+if ($rawInput) {
+    $jsonInput = json_decode($rawInput, true);
+    if ($jsonInput) {
+        if (isset($jsonInput['action'])) $action = $jsonInput['action'];
+        if (isset($jsonInput['udid'])) $udid = $jsonInput['udid'];
+        if (isset($jsonInput['kami'])) $kami = $jsonInput['kami'];
+        if (isset($jsonInput['card']) && empty($kami)) $kami = $jsonInput['card'];
+        if (isset($jsonInput['device_id']) && empty($udid)) $udid = $jsonInput['device_id'];
     }
+}
+
+function sendSuccess($card, $days = 365) {
+    $expiresAt = date('Y/m/d H:i:s', time() + $days * 24 * 3600);
+    $duration = $days . '天0小时';
+    echo json_encode([
+        'code' => 0,
+        'msg' => '登录成功',
+        'data' => [
+            'card' => $card,
+            'card_type' => 'day',
+            'expires_at' => $expiresAt,
+            'duration' => $duration
+        ]
+    ]);
     exit;
 }
 
+function sendFail($msg = '卡密无效') {
+    echo json_encode([
+        'code' => -1,
+        'msg' => $msg
+    ]);
+    exit;
+}
+
+// check 请求
+if ($action === 'check') {
+    $boundKami = getKamiForDevice($udid);
+    if ($boundKami) {
+        sendSuccess($boundKami);
+    } else {
+        sendFail('请先输入卡密');
+    }
+}
+
+// use_kami 请求
 if ($action === 'use_kami') {
-    $kami = $_GET['kami'] ?? '';
-    $udid = $_GET['udid'] ?? '';
-    
     if (empty($kami)) {
-        echo json_encode(['code' => -1, 'msg' => '请输入卡密']);
-        exit;
+        sendFail('请输入卡密');
     }
     
     // 调用自有 kmlogon API 验证卡密
@@ -58,41 +78,55 @@ if ($action === 'use_kami') {
     $result = @file_get_contents($kmlogonUrl, false, $ctx);
     
     if ($result === false) {
-        echo json_encode(['code' => -1, 'msg' => '验证服务器连接失败']);
-        exit;
+        sendFail('验证服务器连接失败');
     }
     
     $json = json_decode($result, true);
     
     if ($json && isset($json['code']) && $json['code'] == 200) {
-        // 卡密验证成功
-        $vipTs = isset($json['msg']['vip']) ? intval($json['msg']['vip']) : 4102243200;
-        
-        // 记录设备绑定
         registerDeviceKami($udid, $kami);
-        
-        echo json_encode([
-            'code' => 0,
-            'msg' => 'ok',
-            'data' => [
-                'vip' => $vipTs,
-                'kami' => $kami
-            ]
-        ]);
+        sendSuccess($kami);
     } else {
         $errMsg = '卡密无效';
-        if ($json && isset($json['msg'])) {
-            if (is_string($json['msg'])) {
-                $errMsg = $json['msg'];
-            }
+        if ($json && isset($json['msg']) && is_string($json['msg'])) {
+            $errMsg = $json['msg'];
         }
-        echo json_encode(['code' => -1, 'msg' => $errMsg]);
+        sendFail($errMsg);
     }
-    exit;
 }
 
-// 未知 action
-echo json_encode(['code' => -1, 'msg' => 'unknown action']);
+// 兼容 POST /api/login 格式（同行插件格式）
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($action)) {
+    $card = $kami;
+    $device_id = $udid;
+    
+    if (empty($card)) {
+        sendFail('请输入卡密');
+    }
+    
+    $kmlogonUrl = "http://124.221.171.80/api.php?api=kmlogon&app=10003&kami=" . urlencode($card) . "&markcode=" . urlencode($device_id);
+    $ctx = stream_context_create(['http' => ['timeout' => 10]]);
+    $result = @file_get_contents($kmlogonUrl, false, $ctx);
+    
+    if ($result === false) {
+        sendFail('验证服务器连接失败');
+    }
+    
+    $json = json_decode($result, true);
+    
+    if ($json && isset($json['code']) && $json['code'] == 200) {
+        registerDeviceKami($device_id, $card);
+        sendSuccess($card);
+    } else {
+        $errMsg = '卡密不存在';
+        if ($json && isset($json['msg']) && is_string($json['msg'])) {
+            $errMsg = $json['msg'];
+        }
+        sendFail($errMsg);
+    }
+}
+
+sendFail('unknown action');
 
 
 // ===== 辅助函数 =====
@@ -116,7 +150,6 @@ function registerDeviceKami($udid, $kami) {
     if (file_exists($dbFile)) {
         $data = json_decode(file_get_contents($dbFile), true) ?: [];
     }
-    // 更新或添加
     $found = false;
     foreach ($data as &$entry) {
         if ($entry['udid'] === $udid) {
