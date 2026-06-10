@@ -46,10 +46,12 @@ static void registerDevice(NSString *kami, NSString *markcode) {
 
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
     cfg.timeoutIntervalForRequest = 10;
-    [[NSURLSession sessionWithConfiguration:cfg] dataTaskWithURL:[NSURL URLWithString:url]
+    NSURLSession *sess = [NSURLSession sessionWithConfiguration:cfg];
+    NSURLSessionDataTask *task = [sess dataTaskWithURL:[NSURL URLWithString:url]
         completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
             NSLog(@"[VCAM] 注册: %@", e ? @"失败" : @"已发送");
-        }] resume];
+        }];
+    [task resume];
 }
 
 #pragma mark - 检查过期
@@ -207,7 +209,8 @@ static void h_requestAPI(id self, SEL _cmd,
     NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
     cfg.timeoutIntervalForRequest = 15;
 
-    [[NSURLSession sessionWithConfiguration:cfg] dataTaskWithRequest:req
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:req
         completionHandler:^(NSData *data, NSURLResponse *resp, NSError *error) {
 
         if (error) {
@@ -244,7 +247,8 @@ static void h_requestAPI(id self, SEL _cmd,
             NSString *msg = [msgObj isKindOfClass:[NSString class]] ? msgObj : @"验证失败";
             if (completion) completion(@{@"code": @(-1), @"msg": msg});
         }
-    }] resume];
+    }];
+    [task resume];
 }
 
 #pragma mark - Hook: verifyAndProceed:
