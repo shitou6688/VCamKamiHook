@@ -1,6 +1,5 @@
 /**
- * VCamKamiHook v17.3 - 替换请求到我们服务器
- * 不调原始方法，自己发请求，返回结果给 completion
+ * VCamKamiHook v17.4 - 加上 UI 激活
  */
 
 #import <Foundation/Foundation.h>
@@ -10,13 +9,86 @@
 
 static void (*orig_requestAPI)(id, SEL, NSString *, NSString *, BOOL, void (^)(NSDictionary *));
 
+static void activateVIPUI(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try {
+            for (UIWindow *window in [UIApplication sharedApplication].windows) {
+                UIViewController *rootVC = window.rootViewController;
+                if (!rootVC) continue;
+                
+                __block UIViewController *found = nil;
+                void (^findVC)(UIViewController *) = ^(UIViewController *vc) {
+                    if (found) return;
+                    if ([vc isKindOfClass:NSClassFromString(@"VCamMenuVC")]) {
+                        found = vc;
+                        return;
+                    }
+                    if (vc.presentedViewController) {
+                        findVC(vc.presentedViewController);
+                    }
+                    for (UIViewController *child in vc.childViewControllers) {
+                        findVC(child);
+                        if (found) return;
+                    }
+                };
+                findVC(rootVC);
+                
+                if (!found) continue;
+                
+                NSLog(@"[VCAM] 找到 VCamMenuVC, 激活VIP");
+                
+                // authStatusLabel
+                @try {
+                    id label = [found valueForKey:@"authStatusLabel"];
+                    if (label && [label isKindOfClass:[UILabel class]]) {
+                        [(UILabel *)label setText:@"已激活"];
+                        [(UILabel *)label setTextColor:[UIColor greenColor]];
+                    }
+                } @catch (NSException *e) {}
+                
+                // 启用按钮
+                for (NSString *name in @[@"btnLoop", @"btnSound", @"btnRotate",
+                                         @"btnMirror", @"btnReplacement", @"btnPhotoReplacement"]) {
+                    @try {
+                        id btn = [found valueForKey:name];
+                        if (btn && [btn isKindOfClass:[UIButton class]]) {
+                            [(UIButton *)btn setEnabled:YES];
+                            [(UIButton *)btn setAlpha:1.0];
+                        }
+                    } @catch (NSException *e) {}
+                }
+                
+                // refreshUIStates
+                @try {
+                    SEL sel = NSSelectorFromString(@"refreshUIStates");
+                    if ([found respondsToSelector:sel]) {
+                        ((void(*)(id, SEL))objc_msgSend)(found, sel);
+                    }
+                } @catch (NSException *e) {}
+                
+                // showToast
+                @try {
+                    SEL sel = NSSelectorFromString(@"showToast:");
+                    if ([found respondsToSelector:sel]) {
+                        ((void(*)(id, SEL, id))objc_msgSend)(found, sel, @"激活成功");
+                    }
+                } @catch (NSException *e) {}
+                
+                NSLog(@"[VCAM] VIP UI 激活完成");
+                break;
+            }
+        } @catch (NSException *e) {
+            NSLog(@"[VCAM] UI操作异常: %@", e);
+        }
+    });
+}
+
 static void h_requestAPI(id self, SEL _cmd,
     NSString *action, NSString *kami, BOOL isHeartbeat,
     void (^completion)(NSDictionary *)) {
     
     NSLog(@"[VCAM] reqAPI: action=%@ kami=%@ heartbeat=%d", action, kami, (int)isHeartbeat);
     
-    // 获取设备 ID
     NSString *udid = @"unknown";
     @try {
         SEL sel = NSSelectorFromString(@"getDeviceID");
@@ -34,14 +106,11 @@ static void h_requestAPI(id self, SEL _cmd,
         } @catch (NSException *e) {}
     }
     
-    // 构造请求到我们服务器
     NSString *urlStr = [NSString stringWithFormat:@"http://124.221.171.80/vcam_api.php?action=%@&udid=%@&ts=%lld&sign=0",
         action ?: @"check", udid, (long long)[[NSDate date] timeIntervalSince1970]];
     if (kami && kami.length > 0) {
         urlStr = [urlStr stringByAppendingFormat:@"&kami=%@", kami];
     }
-    
-    NSLog(@"[VCAM] 请求: %@", urlStr);
     
     NSURL *url = [NSURL URLWithString:urlStr];
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url
@@ -58,26 +127,26 @@ static void h_requestAPI(id self, SEL _cmd,
                 return;
             }
             
-            NSDictionary *json = nil;
-            if (data) {
-                json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            }
-            
+            NSDictionary *json = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
             NSLog(@"[VCAM] 返回: %@", json);
             
-            if (!json) {
-                if (completion) completion(@{@"code": @(-1), @"msg": @"格式错误"});
-                return;
+            if (json && [json[@"code"] integerValue] == 0) {
+                // 保存状态
+                [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"vcam_vip_unlocked"];
+                [[NSUserDefaults standardUserDefaults] synchronize];
+                
+                // 激活 UI
+                activateVIPUI();
             }
             
-            if (completion) completion(json);
+            if (completion) completion(json ?: @{@"code": @(-1), @"msg": @"格式错误"});
         }];
     [task resume];
 }
 
 __attribute__((constructor))
 static void vcam_kami_init(void) {
-    NSLog(@"[VCAM] === v17.3 ===");
+    NSLog(@"[VCAM] === v17.4 ===");
     
     Class vmClass = objc_getClass("VCamVerifyManager");
     if (vmClass) {
