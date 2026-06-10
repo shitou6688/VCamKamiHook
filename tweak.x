@@ -66,10 +66,7 @@ static void activateVIP(void) {
         if (kcClass) {
             SEL setPwSel = @selector(setPassword:forService:account:);
             if ([kcClass respondsToSelector:setPwSel]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                [kcClass performSelector:setPwSel withObject:@"VCAM_VIP_ACTIVATED" withObject:@"vcam_kami" withObject:@"vcam_kami"];
-#pragma clang diagnostic pop
+                ((void(*)(id, SEL, id, id, id))objc_msgSend)(kcClass, setPwSel, @"VCAM_VIP_ACTIVATED", @"vcam_kami", @"vcam_kami");
                 NSLog(@"[VCAM] Keychain 已设置");
             }
         } else {
@@ -85,7 +82,7 @@ static void activateVIP(void) {
             // 遍历所有 window 找 VCamMenuVC
             for (UIWindow *window in [UIApplication sharedApplication].windows) {
                 UIViewController *rootVC = window.rootViewController;
-                UIViewController *targetVC = nil;
+                __block UIViewController *targetVC = nil;
                 
                 // 递归查找
                 void (^findVC)(UIViewController *) = ^(UIViewController *vc) {
