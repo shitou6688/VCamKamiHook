@@ -38,7 +38,7 @@ jobs:
               -undefined suppress \
               -dynamiclib \
               -o build/VCamKamiHook.dylib \
-              tweak.x
+              vcamkamihook/tweak.x
 
           codesign -f -s - build/VCamKamiHook.dylib
 
@@ -58,7 +58,7 @@ jobs:
               -undefined suppress \
               -dynamiclib \
               -o build/VCamKamiMemory.dylib \
-              VCamKamiMemory.x
+              vcamkamihook/kammem.x
 
           codesign -f -s - build/VCamKamiMemory.dylib
           echo "=== Build result ==="
