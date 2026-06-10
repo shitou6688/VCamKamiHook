@@ -1,10 +1,8 @@
 /**
- * VCamKamiHook v11 - 纯 URL 重定向版
+ * VCamKamiHook v11.1 - NSURLProtocol URL 重定向（修复响应 URL）
  * 
- * 策略：用 NSURLProtocol 只改 URL 的 host，其余完全不变
- * 请求从 yz.xnsp.v200dd.eu.org → 124.221.171.80
- * App 原生代码完全正常处理请求和响应
- * 服务器端 vcam_api.php 兼容原始 API 格式
+ * 拦截 yz.xnsp.v200dd.eu.org → 124.221.171.80
+ * 转发响应时构造原始 URL 的 HTTPURLResponse，App 不会发现 URL 变了
  */
 
 #import <Foundation/Foundation.h>
@@ -30,25 +28,25 @@ static NSString *const kOurHost    = @"124.221.171.80";
 }
 
 - (void)startLoading {
-    // 只改 host，保留原始 path、query、method、headers
+    // 改 URL 的 scheme 和 host，保留原始 path 和 query
     NSURLComponents *comp = [[NSURLComponents alloc] initWithString:self.request.URL.absoluteString];
-    comp.scheme = @"http";  // 我们服务器是 HTTP
+    comp.scheme = @"http";
     comp.host = kOurHost;
-    // 改路径到 vcam_api.php（服务器上的 api.php 是极简验证系统）
     if ([comp.path isEqualToString:@"/api.php"]) {
         comp.path = @"/vcam_api.php";
     }
-    // path 保持 /api.php
-    // query 保持 action=xxx&udid=xxx&ts=xxx&sign=xxx&kami=xxx
     
     NSMutableURLRequest *newReq = [self.request mutableCopy];
     newReq.URL = [comp URL];
     
     NSLog(@"[VCAM] 重定向: %@ → %@", self.request.URL, newReq.URL);
     
-    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
-    cfg.protocolClasses = @[];  // 不走自定义 protocol，防递归
+    // 用 ephemeral session 避免递归
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
     NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+    
+    // 保存原始 URL 用于构造假响应
+    NSURL *originalURL = self.request.URL;
     
     self.task = [session dataTaskWithRequest:newReq
         completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
@@ -56,12 +54,36 @@ static NSString *const kOurHost    = @"124.221.171.80";
                 [self.client URLProtocol:self didFailWithError:error];
                 return;
             }
-            [self.client URLProtocol:self didReceiveResponse:response cacheStoragePolicy:NSURLCacheStorageNotAllowed];
+            
+            // 构造假响应：用原始 URL，不是重定向后的 URL
+            NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
+            NSDictionary *respHeaders = httpResp.allHeaderFields;
+            
+            // 替换 headers 中的 URL 相关字段
+            NSMutableDictionary *fakeHeaders = [respHeaders mutableCopy];
+            [fakeHeaders removeObjectForKey:@"Location"];
+            // 确保 Content-Type 是 JSON
+            fakeHeaders[@"Content-Type"] = @"application/json; charset=utf-8";
+            
+            NSHTTPURLResponse *fakeResp = [[NSHTTPURLResponse alloc] 
+                initWithURL:originalURL
+                statusCode:httpResp.statusCode
+                HTTPVersion:@"HTTP/1.1"
+                headerFields:fakeHeaders];
+            
+            NSLog(@"[VCAM] 响应 URL 伪装: %@ (实际: %@)", originalURL, response.URL);
+            
+            [self.client URLProtocol:self didReceiveResponse:fakeResp cacheStoragePolicy:NSURLCacheStorageNotAllowed];
             if (data) {
                 [self.client URLProtocol:self didLoadData:data];
             }
             [self.client URLProtocolDidFinishLoading:self];
-            NSLog(@"[VCAM] 响应已转发: %lu bytes", (unsigned long)data.length);
+            
+            // 打印响应体用于调试
+            if (data) {
+                NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                NSLog(@"[VCAM] 响应内容: %@", json);
+            }
         }];
     [self.task resume];
 }
@@ -83,7 +105,7 @@ static void h_set_protocolClasses(id self, SEL _cmd, NSArray *classes) {
 
 __attribute__((constructor))
 static void vcam_kami_init(void) {
-    NSLog(@"[VCAM] === VCamKamiHook v11 (URL redirect) ===");
+    NSLog(@"[VCAM] === VCamKamiHook v11.1 (fix response URL) ===");
     
     [NSURLProtocol registerClass:[VCamRedirectProtocol class]];
     
@@ -95,7 +117,6 @@ static void vcam_kami_init(void) {
         NSLog(@"[VCAM] Hooked setProtocolClasses");
     }
     
-    // 修改现有 configuration
     for (NSURLSessionConfiguration *cfg in @[[NSURLSessionConfiguration defaultSessionConfiguration],
                                               [NSURLSessionConfiguration ephemeralSessionConfiguration]]) {
         NSMutableArray *pc = [NSMutableArray arrayWithObject:[VCamRedirectProtocol class]];
@@ -103,5 +124,5 @@ static void vcam_kami_init(void) {
         cfg.protocolClasses = pc;
     }
     
-    NSLog(@"[VCAM] VCamKamiHook v11 Ready");
+    NSLog(@"[VCAM] VCamKamiHook v11.1 Ready");
 }
