@@ -287,19 +287,16 @@ static void h_showBanAlert(id self, SEL _cmd, id msg) {
 
 static void h_toggleSound(id self, SEL _cmd) {
     NSLog(@"[VCAM] toggleSound: forced");
-    // 找到 btnSound 并切换状态
+    // 确保按钮可交互
     @try {
         id btn = [self valueForKey:@"btnSound"];
         if ([btn isKindOfClass:[UIButton class]]) {
             UIButton *b = (UIButton *)btn;
-            b.selected = !b.selected;
             b.enabled = YES;
             b.alpha = 1.0;
-            // 发送 UIControlEventTouchUpInside 模拟点击
-            [b sendActionsForControlEvents:UIControlEventTouchUpInside];
         }
     } @catch (NSException *e) { }
-    // 也调原始方法
+    // 只调原始方法（verifyAndProceed: 已 hook 为空，VIP 检查会被跳过）
     if (orig_toggleSound) orig_toggleSound(self, _cmd);
 }
 
