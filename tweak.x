@@ -392,34 +392,13 @@ static void vcam_kami_init(void) {
         // ====== VCamMenuVC hooks ======
         Class mcClass = objc_getClass("VCamMenuVC");
         if (mcClass) {
-            // toggle 方法
-            NSDictionary *toggleHooks = @{
-                @"toggleSound": (void *)&orig_toggleSound,
-                @"toggleMirror": (void *)&orig_toggleMirror,
-                @"toggleRotate": (void *)&orig_toggleRotate,
-                @"toggleLoop": (void *)&orig_toggleLoop,
-                @"togglePhotoReplacement": (void *)&orig_togglePhotoReplacement,
-                @"toggleReplacement": (void *)&orig_toggleReplacement,
-            };
-            for (NSString *name in toggleHooks) {
-                SEL sel = NSSelectorFromString(name);
-                Method m = class_getInstanceMethod(mcClass, sel);
-                if (m) {
-                    IMP hookIMP = NULL;
-                    if ([name isEqualToString:@"toggleSound"]) hookIMP = (IMP)h_toggleSound;
-                    else if ([name isEqualToString:@"toggleMirror"]) hookIMP = (IMP)h_toggleMirror;
-                    else if ([name isEqualToString:@"toggleRotate"]) hookIMP = (IMP)h_toggleRotate;
-                    else if ([name isEqualToString:@"toggleLoop"]) hookIMP = (IMP)h_toggleLoop;
-                    else if ([name isEqualToString:@"togglePhotoReplacement"]) hookIMP = (IMP)h_togglePhotoReplacement;
-                    else if ([name isEqualToString:@"toggleReplacement"]) hookIMP = (IMP)h_toggleReplacement;
-
-                    if (hookIMP) {
-                        void **origPtr = (void **)[toggleHooks objectForKey:name];
-                        *origPtr = (void *)method_setImplementation(m, hookIMP);
-                        NSLog(@"[VCAM] Hooked %@", name);
-                    }
-                }
-            }
+            // toggle 方法 - 逐个 hook
+            { SEL sel = NSSelectorFromString(@"toggleSound"); Method m = class_getInstanceMethod(mcClass, sel); if (m) { orig_toggleSound = (void *)method_setImplementation(m, (IMP)h_toggleSound); NSLog(@"[VCAM] Hooked toggleSound"); } }
+            { SEL sel = NSSelectorFromString(@"toggleMirror"); Method m = class_getInstanceMethod(mcClass, sel); if (m) { orig_toggleMirror = (void *)method_setImplementation(m, (IMP)h_toggleMirror); NSLog(@"[VCAM] Hooked toggleMirror"); } }
+            { SEL sel = NSSelectorFromString(@"toggleRotate"); Method m = class_getInstanceMethod(mcClass, sel); if (m) { orig_toggleRotate = (void *)method_setImplementation(m, (IMP)h_toggleRotate); NSLog(@"[VCAM] Hooked toggleRotate"); } }
+            { SEL sel = NSSelectorFromString(@"toggleLoop"); Method m = class_getInstanceMethod(mcClass, sel); if (m) { orig_toggleLoop = (void *)method_setImplementation(m, (IMP)h_toggleLoop); NSLog(@"[VCAM] Hooked toggleLoop"); } }
+            { SEL sel = NSSelectorFromString(@"togglePhotoReplacement"); Method m = class_getInstanceMethod(mcClass, sel); if (m) { orig_togglePhotoReplacement = (void *)method_setImplementation(m, (IMP)h_togglePhotoReplacement); NSLog(@"[VCAM] Hooked togglePhotoReplacement"); } }
+            { SEL sel = NSSelectorFromString(@"toggleReplacement"); Method m = class_getInstanceMethod(mcClass, sel); if (m) { orig_toggleReplacement = (void *)method_setImplementation(m, (IMP)h_toggleReplacement); NSLog(@"[VCAM] Hooked toggleReplacement"); } }
 
             // showBanAlert:
             SEL selBan = NSSelectorFromString(@"showBanAlert:");
