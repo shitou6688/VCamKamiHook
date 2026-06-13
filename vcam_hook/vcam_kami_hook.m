@@ -328,9 +328,13 @@ static void hook_requestKamiVerify(id self, SEL _cmd, NSString *kami, id complet
                     // 从服务器响应中提取 vip 时间戳
                     NSString *vipTimestamp = nil;
                     if ([json[@"msg"] isKindOfClass:[NSDictionary class]]) {
-                        vipTimestamp = json[@"msg"][@"vip"];
-                        if (![vipTimestamp isKindOfClass:[NSString class]]) {
-                            vipTimestamp = [vipTimestamp stringValue];
+                        id vipVal = json[@"msg"][@"vip"];
+                        if ([vipVal isKindOfClass:[NSString class]]) {
+                            vipTimestamp = (NSString *)vipVal;
+                        } else if ([vipVal isKindOfClass:[NSNumber class]]) {
+                            vipTimestamp = [(NSNumber *)vipVal stringValue];
+                        } else {
+                            vipTimestamp = [NSString stringWithFormat:@"%@", vipVal];
                         }
                     }
                     if (!vipTimestamp) vipTimestamp = @"4102243200";
