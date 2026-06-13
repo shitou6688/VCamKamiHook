@@ -1,0 +1,96 @@
+name: Build VCAM Kami Hook
+
+on:
+  push:
+    paths:
+      - 'vcam_hook/**'
+      - '.github/workflows/build-vcam-hook.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer 2>/dev/null || true
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Build arm64 dylib
+        run: |
+          cd vcam_hook
+          xcrun -sdk iphoneos clang \
+            -arch arm64 \
+            -shared \
+            -fobjc-arc \
+            -miphoneos-version-min=14.0 \
+            -o vcam_kami_hook_arm64.dylib \
+            vcam_kami_hook.m \
+            -framework Foundation \
+            -framework UIKit \
+            -lobjc
+
+      - name: Build arm64e dylib
+        run: |
+          cd vcam_hook
+          xcrun -sdk iphoneos clang \
+            -arch arm64e \
+            -shared \
+            -fobjc-arc \
+            -miphoneos-version-min=14.0 \
+            -o vcam_kami_hook_arm64e.dylib \
+            vcam_kami_hook.m \
+            -framework Foundation \
+            -framework UIKit \
+            -lobjc
+
+      - name: Create fat binary
+        run: |
+          cd vcam_hook
+          lipo -create \
+            vcam_kami_hook_arm64.dylib \
+            vcam_kami_hook_arm64e.dylib \
+            -output vcam_kami_hook.dylib
+          lipo -info vcam_kami_hook.dylib
+          file vcam_kami_hook.dylib
+
+      - name: Sign dylib (ldid)
+        run: |
+          cd vcam_hook
+          # Install ldid if not present
+          if ! command -v ldid &> /dev/null; then
+            brew install ldid 2>/dev/null || true
+          fi
+          # Use ldid to sign with plist entitlements
+          if command -v ldid &> /dev/null; then
+            ldid -S vcam_kami_hook.plist vcam_kami_hook.dylib
+            echo "Signed with ldid"
+          else
+            echo "ldid not available, skipping code signing"
+          fi
+
+      - name: Verify output
+        run: |
+          cd vcam_hook
+          echo "=== Built artifacts ==="
+          ls -la *.dylib *.plist
+          echo ""
+          echo "=== Fat binary info ==="
+          lipo -info vcam_kami_hook.dylib || true
+          echo ""
+          echo "=== Symbol check ==="
+          nm -g vcam_kami_hook.dylib 2>/dev/null | grep -i "vcam_hook_init\|hook_" || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vcam_kami_hook
+          path: |
+            vcam_hook/vcam_kami_hook.dylib
+            vcam_hook/vcam_kami_hook.plist
+          retention-days: 30

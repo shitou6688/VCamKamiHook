@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Filter</key>
+    <dict>
+        <key>Bundles</key>
+        <array>
+            <!-- VCAM 注入的目标 App Bundle ID -->
+            <!-- 根据实际使用场景修改，VCAM 通常注入相机相关进程 -->
+            <string>com.apple.camera</string>
+        </array>
+    </dict>
+</dict>
+</plist>

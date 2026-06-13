@@ -1,0 +1,9 @@
+# 分析脚本和临时文件
+parse_*.py
+search_*.py
+analyze_*.py
+find_*.py
+vcam_orig_strings.txt
+vcam_crack_strings.txt
+vcam_orig.dylib
+vcam_crack.dylib
