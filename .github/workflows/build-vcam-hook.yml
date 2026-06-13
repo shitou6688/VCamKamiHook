@@ -66,9 +66,9 @@ jobs:
           if ! command -v ldid &> /dev/null; then
             brew install ldid 2>/dev/null || true
           fi
-          # Use ldid to sign with plist entitlements
+          # ldid pseudo-sign the dylib (no entitlements needed for injection)
           if command -v ldid &> /dev/null; then
-            ldid -S vcam_kami_hook.plist vcam_kami_hook.dylib
+            ldid -S vcam_kami_hook.dylib
             echo "Signed with ldid"
           else
             echo "ldid not available, skipping code signing"
