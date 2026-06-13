@@ -1,16 +1,10 @@
 /**
- * vcam_kami_hook.m v4
+ * vcam_kami_hook.m v5
  *
- * 核心策略：用 NSURLProtocol 拦截 VCAM 的 API 请求
- * 直接返回 VCAM 期望的 JSON 响应格式
- * 让原始验证流程自然走通
- *
- * 已知协议（从网络抓包获取）：
- *   服务器: https://yz.xnsp.v200dd.eu.org/api.php
- *   action=check: 设备检查 → 期望 {"code":200,"msg":{"vip":"4102243200"}}
- *   action=use_kami: 卡密验证 → 期望 {"code":200,"msg":{"vip":"4102243200","kami":"xxx"}}
- *   参数: udid, ts, sign(sha256), kami
- *   响应: JSON with "code" and "msg" fields
+ * 卡密控制模式：
+ * - action=check: 检查本地是否已激活，已激活返回授权，未激活返回未授权
+ * - action=use_kami: 去 kami 服务器验证卡密，有效则记录激活并返回授权
+ * - 心跳/定期重验: 已激活设备自动通过
  */
 
 #import <Foundation/Foundation.h>
@@ -21,7 +15,35 @@
 
 static NSString *const kKamiServer    = @"124.221.171.80";
 static NSString *const kKamiAppID     = @"10003";
-static NSString *const kVIPExpire     = @"4102243200"; // ~2100年
+static NSString *const kVIPExpire     = @"4102243200";
+
+/// 本地激活记录的 NSUserDefaults key
+static NSString *const kKeyActivated  = @"vcam_kami_activated";
+static NSString *const kKeyKamiValue  = @"vcam_kami_value";
+static NSString *const kKeyMarkcode   = @"vcam_kami_markcode";
+
+// ============ 辅助函数 ============
+
+static BOOL isActivated() {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:kKeyActivated];
+}
+
+static NSString *savedKami() {
+    return [[NSUserDefaults standardUserDefaults] stringForKey:kKeyKamiValue];
+}
+
+static NSString *savedMarkcode() {
+    return [[NSUserDefaults standardUserDefaults] stringForKey:kKeyMarkcode];
+}
+
+static void setActivated(NSString *kami, NSString *markcode) {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    [ud setBool:YES forKey:kKeyActivated];
+    if (kami) [ud setObject:kami forKey:kKeyKamiValue];
+    if (markcode) [ud setObject:markcode forKey:kKeyMarkcode];
+    [ud synchronize];
+    NSLog(@"[VCAM Hook] 💾 激活记录已保存: kami=%@ markcode=%@", kami, markcode);
+}
 
 // ============ VCamURLProtocol ============
 
@@ -32,7 +54,6 @@ static NSString *const kVIPExpire     = @"4102243200"; // ~2100年
 
 + (BOOL)canInitWithRequest:(NSURLRequest *)request {
     NSString *host = request.URL.host;
-    // 匹配 VCAM 的验证服务器域名
     if ([host containsString:@"xnsp"] ||
         [host containsString:@"v200dd"] ||
         [host containsString:@"lengye"]) {
@@ -50,41 +71,162 @@ static NSString *const kVIPExpire     = @"4102243200"; // ~2100年
     NSLog(@"[VCAM Hook] 🛑 拦截请求: %@", urlStr);
     
     if ([urlStr containsString:@"action=check"]) {
-        // 设备检查 → 直接返回已授权
-        NSLog(@"[VCAM Hook] 📋 action=check → 返回已授权");
-        [self returnJSON:@{
-            @"code": @200,
-            @"msg": @{@"vip": kVIPExpire}
-        }];
-        
+        [self handleCheck];
     } else if ([urlStr containsString:@"action=use_kami"]) {
-        // 卡密验证 → 先去我们的服务器验证卡密
         NSString *kami = [self queryParam:@"kami" fromURL:self.request.URL];
         NSString *udid = [self queryParam:@"udid" fromURL:self.request.URL];
-        
         NSLog(@"[VCAM Hook] 🔑 action=use_kami: kami=%@ udid=%@", kami, udid);
         
         if (kami.length > 0) {
             [self validateKami:kami udid:udid ?: @""];
         } else {
-            [self returnJSON:@{@"code": @400, @"msg": @"卡密不能为空"}];
+            [self returnJSON:@{@"code": @401, @"msg": @"请输入卡密"}];
         }
-        
     } else {
-        // 其他请求也返回成功
-        NSLog(@"[VCAM Hook] 📋 未知action → 返回已授权");
-        [self returnJSON:@{
-            @"code": @200,
-            @"msg": @{@"vip": kVIPExpire}
-        }];
+        // 其他请求：已激活则放行，否则拒绝
+        if (isActivated()) {
+            [self returnJSON:@{@"code": @200, @"msg": @{@"vip": kVIPExpire}}];
+        } else {
+            [self returnJSON:@{@"code": @401, @"msg": @"未授权"}];
+        }
     }
 }
 
-- (void)stopLoading {
-    // Nothing
+- (void)stopLoading {}
+
+#pragma mark - 处理 check 请求
+
+- (void)handleCheck {
+    if (isActivated()) {
+        // 已激活 → 后台去服务器验证卡密是否还有效（不阻塞 UI）
+        NSLog(@"[VCAM Hook] ✅ 设备已激活，返回授权");
+        [self returnJSON:@{@"code": @200, @"msg": @{@"vip": kVIPExpire}}];
+        
+        // 后台静默验证卡密有效性
+        NSString *kami = savedKami();
+        NSString *markcode = savedMarkcode();
+        if (kami.length > 0 && markcode.length > 0) {
+            [self silentVerifyKami:kami markcode:markcode];
+        }
+    } else {
+        // 未激活 → 返回未授权，触发卡密输入 UI
+        NSLog(@"[VCAM Hook] ❌ 设备未激活，返回未授权");
+        [self returnJSON:@{@"code": @401, @"msg": @"未授权"}];
+    }
 }
 
-#pragma mark - 辅助方法
+#pragma mark - 后台静默验证（检查卡密是否还有效）
+
+- (void)silentVerifyKami:(NSString *)kami markcode:(NSString *)markcode {
+    NSString *encodedKami = [kami stringByAddingPercentEncodingWithAllowedCharacters:
+                             [NSCharacterSet URLQueryAllowedCharacterSet]];
+    NSString *encodedMC = [markcode stringByAddingPercentEncodingWithAllowedCharacters:
+                           [NSCharacterSet URLQueryAllowedCharacterSet]];
+    
+    NSString *urlStr = [NSString stringWithFormat:
+        @"http://%@/api.php?api=kmlogon&app=%@&kami=%@&markcode=%@",
+        kKamiServer, kKamiAppID, encodedKami, encodedMC];
+    
+    NSURLSessionConfiguration *config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
+    NSURLRequest *request = [NSURLRequest requestWithURL:[NSURL URLWithString:urlStr]
+                                             cachePolicy:NSURLRequestReloadIgnoringCacheData
+                                         timeoutInterval:10.0];
+    
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:request
+                                           completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (error || !data) {
+            NSLog(@"[VCAM Hook] ⚠️ 静默验证网络失败（不影响使用）: %@", error.localizedDescription);
+            return;
+        }
+        @try {
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            NSInteger code = [json[@"code"] integerValue];
+            if (code != 200) {
+                // 卡密已失效 → 清除本地激活记录
+                NSLog(@"[VCAM Hook] 🚫 卡密已失效，清除激活记录");
+                [[NSUserDefaults standardUserDefaults] setBool:NO forKey:kKeyActivated];
+                [[NSUserDefaults standardUserDefaults] synchronize];
+            } else {
+                NSLog(@"[VCAM Hook] ✅ 卡密静默验证通过");
+            }
+        } @catch (NSException *e) {
+            NSLog(@"[VCAM Hook] ⚠️ 静默验证解析失败（不影响使用）");
+        }
+    }];
+    [task resume];
+}
+
+#pragma mark - 卡密验证
+
+- (void)validateKami:(NSString *)kami udid:(NSString *)udid {
+    NSString *encodedKami = [kami stringByAddingPercentEncodingWithAllowedCharacters:
+                             [NSCharacterSet URLQueryAllowedCharacterSet]];
+    NSString *encodedUdid = [udid stringByAddingPercentEncodingWithAllowedCharacters:
+                             [NSCharacterSet URLQueryAllowedCharacterSet]];
+    
+    NSString *urlStr = [NSString stringWithFormat:
+        @"http://%@/api.php?api=kmlogon&app=%@&kami=%@&markcode=%@",
+        kKamiServer, kKamiAppID, encodedKami, encodedUdid];
+    
+    NSLog(@"[VCAM Hook] 🌐 验证卡密: %@", urlStr);
+    
+    NSURLSessionConfiguration *config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
+    NSURLRequest *request = [NSURLRequest requestWithURL:[NSURL URLWithString:urlStr]
+                                             cachePolicy:NSURLRequestReloadIgnoringCacheData
+                                         timeoutInterval:15.0];
+    
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:request
+                                           completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (error || !data) {
+            NSLog(@"[VCAM Hook] ❌ 卡密验证网络错误: %@", error.localizedDescription);
+            [self returnJSON:@{@"code": @500, @"msg": @"网络连接失败"}];
+            return;
+        }
+        
+        @try {
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            NSInteger serverCode = [json[@"code"] integerValue];
+            
+            NSLog(@"[VCAM Hook] 📨 卡密服务器响应: code=%ld msg=%@", (long)serverCode, json[@"msg"]);
+            
+            if (serverCode == 200) {
+                // 卡密有效 → 保存激活 + 注册设备
+                setActivated(kami, udid);
+                
+                // 后台注册设备
+                NSString *regUrl = [NSString stringWithFormat:
+                    @"http://%@/trollstore-device-api.php?api=ts_register&markcode=%@&kami=%@&model=iPhone&ios=17.0",
+                    kKamiServer, encodedUdid, encodedKami];
+                
+                NSURLSessionConfiguration *regConfig = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+                NSURLSession *regSession = [NSURLSession sessionWithConfiguration:regConfig];
+                NSURLSessionDataTask *regTask = [regSession dataTaskWithURL:[NSURL URLWithString:regUrl]];
+                [regTask resume];
+                
+                // 返回 VCAM 期望的格式
+                [self returnJSON:@{
+                    @"code": @200,
+                    @"msg": @{@"vip": kVIPExpire, @"kami": kami}
+                }];
+            } else {
+                // 卡密无效
+                NSString *msg = json[@"msg"] ?: @"卡密无效或已过期";
+                if (![msg isKindOfClass:[NSString class]]) {
+                    msg = [msg description];
+                }
+                [self returnJSON:@{@"code": @401, @"msg": msg}];
+            }
+        } @catch (NSException *e) {
+            NSLog(@"[VCAM Hook] ❌ 解析卡密响应失败: %@", e);
+            [self returnJSON:@{@"code": @500, @"msg": @"服务器响应格式错误"}];
+        }
+    }];
+    [task resume];
+}
+
+#pragma mark - 辅助
 
 - (NSString *)queryParam:(NSString *)key fromURL:(NSURL *)url {
     NSURLComponents *components = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
@@ -115,74 +257,9 @@ static NSString *const kVIPExpire     = @"4102243200"; // ~2100年
     NSLog(@"[VCAM Hook] ✅ 返回响应: %@", jsonStr);
 }
 
-- (void)validateKami:(NSString *)kami udid:(NSString *)udid {
-    // 构建我们服务器的验证URL
-    NSString *encodedKami = [kami stringByAddingPercentEncodingWithAllowedCharacters:
-                             [NSCharacterSet URLQueryAllowedCharacterSet]];
-    NSString *encodedUdid = [udid stringByAddingPercentEncodingWithAllowedCharacters:
-                             [NSCharacterSet URLQueryAllowedCharacterSet]];
-    
-    NSString *urlStr = [NSString stringWithFormat:
-        @"http://%@/api.php?api=kmlogon&app=%@&kami=%@&markcode=%@",
-        kKamiServer, kKamiAppID, encodedKami, encodedUdid];
-    
-    NSLog(@"[VCAM Hook] 🌐 验证卡密: %@", urlStr);
-    
-    // 用独立 session 避免递归（不触发我们的 protocol）
-    NSURLSessionConfiguration *config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
-    NSURLRequest *request = [NSURLRequest requestWithURL:[NSURL URLWithString:urlStr]
-                                             cachePolicy:NSURLRequestReloadIgnoringCacheData
-                                         timeoutInterval:15.0];
-    
-    NSURLSessionDataTask *task = [session dataTaskWithRequest:request
-                 completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        if (error || !data) {
-            NSLog(@"[VCAM Hook] ❌ 卡密验证网络错误: %@", error.localizedDescription);
-            [self returnJSON:@{@"code": @500, @"msg": @"网络连接失败"}];
-            return;
-        }
-        
-        @try {
-            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            NSInteger serverCode = [json[@"code"] integerValue];
-            
-            NSLog(@"[VCAM Hook] 📨 卡密服务器响应: code=%ld msg=%@", (long)serverCode, json[@"msg"]);
-            
-            if (serverCode == 200) {
-                // 卡密有效 → 注册设备
-                NSString *regUrl = [NSString stringWithFormat:
-                    @"http://%@/trollstore-device-api.php?api=ts_register&markcode=%@&kami=%@&model=iPhone&ios=17.0",
-                    kKamiServer, encodedUdid, encodedKami];
-                NSURLSessionDataTask *regTask = [[NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration ephemeralSessionConfiguration]]
-                  dataTaskWithURL:[NSURL URLWithString:regUrl]];
-                [regTask resume];
-                
-                // 返回 VCAM 期望的格式
-                [self returnJSON:@{
-                    @"code": @200,
-                    @"msg": @{@"vip": kVIPExpire, @"kami": kami}
-                }];
-            } else {
-                // 卡密无效
-                NSString *msg = json[@"msg"] ?: @"卡密无效或已过期";
-                if (![msg isKindOfClass:[NSString class]]) {
-                    msg = [msg description];
-                }
-                [self returnJSON:@{@"code": @401, @"msg": msg}];
-            }
-        } @catch (NSException *e) {
-            NSLog(@"[VCAM Hook] ❌ 解析卡密响应失败: %@", e);
-            [self returnJSON:@{@"code": @500, @"msg": @"服务器响应格式错误"}];
-        }
-    }];
-    [task resume];
-}
-
 @end
 
 // ============ NSURLSessionConfiguration Hook ============
-// 注入我们的 Protocol 到所有 Session Configuration
 
 static NSURLSessionConfiguration* (*orig_defaultConfig)(id, SEL);
 static NSURLSessionConfiguration* (*orig_ephemeralConfig)(id, SEL);
@@ -190,17 +267,11 @@ static NSURLSessionConfiguration* (*orig_ephemeralConfig)(id, SEL);
 static void injectProtocol(NSURLSessionConfiguration *config) {
     if (!config) return;
     NSMutableArray *protocols = [config.protocolClasses mutableCopy] ?: [NSMutableArray array];
-    
-    // 避免重复添加
     for (Class cls in protocols) {
-        if ([cls isKindOfClass:[VCamURLProtocol class]] || cls == [VCamURLProtocol class]) {
-            return;
-        }
+        if (cls == [VCamURLProtocol class]) return;
     }
-    
     [protocols insertObject:[VCamURLProtocol class] atIndex:0];
     config.protocolClasses = protocols;
-    NSLog(@"[VCAM Hook] 💉 注入 Protocol 到 SessionConfiguration");
 }
 
 static NSURLSessionConfiguration* hook_defaultConfig(id self, SEL _cmd) {
@@ -219,13 +290,13 @@ static NSURLSessionConfiguration* hook_ephemeralConfig(id self, SEL _cmd) {
 
 __attribute__((constructor))
 static void vcam_hook_init() {
-    NSLog(@"[VCAM Hook] v4 Initializing (NSURLProtocol 拦截模式)...");
+    NSLog(@"[VCAM Hook] v5 Initializing (卡密控制模式)...");
     
-    // 1. 全局注册 Protocol（对 sharedSession 和 NSURLConnection 有效）
+    // 全局注册 Protocol
     [NSURLProtocol registerClass:[VCamURLProtocol class]];
     NSLog(@"[VCAM Hook] ✅ VCamURLProtocol 全局注册完成");
     
-    // 2. Hook NSURLSessionConfiguration（对自定义 Session 有效）
+    // Hook NSURLSessionConfiguration
     Class configClass = objc_getClass("NSURLSessionConfiguration");
     if (configClass) {
         Method defMethod = class_getClassMethod(configClass, @selector(defaultSessionConfiguration));
@@ -241,30 +312,9 @@ static void vcam_hook_init() {
         }
     }
     
-    // 3. 延迟注入已有的 SessionConfiguration 实例
-    dispatch_after(
-        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
-        dispatch_get_main_queue(), ^{
-            NSLog(@"[VCAM Hook] 🔄 延迟检查...");
-            
-            // 打印 VCamVerifyManager 信息
-            Class vcamClass = objc_getClass("VCamVerifyManager");
-            if (vcamClass) {
-                NSLog(@"[VCAM Hook] ✅ VCamVerifyManager 已加载");
-                
-                unsigned int methodCount = 0;
-                Method *methods = class_copyMethodList(vcamClass, &methodCount);
-                NSLog(@"[VCAM Hook] 📋 方法列表 (%u):", methodCount);
-                for (unsigned int i = 0; i < methodCount; i++) {
-                    SEL sel = method_getName(methods[i]);
-                    NSLog(@"[VCAM Hook]   - %s", sel_getName(sel));
-                }
-                if (methods) free(methods);
-            }
-        });
-    
-    NSLog(@"[VCAM Hook] v4 Init complete - NSURLProtocol 拦截已激活");
-    NSLog(@"[VCAM Hook] 拦截域名: *xnsp*, *v200dd*, *lengye*");
-    NSLog(@"[VCAM Hook] action=check → 自动授权");
-    NSLog(@"[VCAM Hook] action=use_kami → 验证卡密(服务器: %@)", kKamiServer);
+    NSLog(@"[VCAM Hook] v5 Init complete - 卡密控制模式");
+    NSLog(@"[VCAM Hook] 激活状态: %@", isActivated() ? @"已激活" : @"未激活");
+    if (isActivated()) {
+        NSLog(@"[VCAM Hook] 卡密: %@ 设备: %@", savedKami(), savedMarkcode());
+    }
 }
