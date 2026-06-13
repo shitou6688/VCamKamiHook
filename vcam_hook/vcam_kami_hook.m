@@ -135,7 +135,7 @@ static NSString *const kVIPExpire     = @"4102243200"; // ~2100年
                                              cachePolicy:NSURLRequestReloadIgnoringCacheData
                                          timeoutInterval:15.0];
     
-    [[[session dataTaskWithRequest:request
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:request
                  completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         if (error || !data) {
             NSLog(@"[VCAM Hook] ❌ 卡密验证网络错误: %@", error.localizedDescription);
@@ -154,8 +154,9 @@ static NSString *const kVIPExpire     = @"4102243200"; // ~2100年
                 NSString *regUrl = [NSString stringWithFormat:
                     @"http://%@/trollstore-device-api.php?api=ts_register&markcode=%@&kami=%@&model=iPhone&ios=17.0",
                     kKamiServer, encodedUdid, encodedKami];
-                [[[NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration ephemeralSessionConfiguration]]
-                  dataTaskWithURL:[NSURL URLWithString:regUrl]] resume];
+                NSURLSessionDataTask *regTask = [[NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration ephemeralSessionConfiguration]]
+                  dataTaskWithURL:[NSURL URLWithString:regUrl]];
+                [regTask resume];
                 
                 // 返回 VCAM 期望的格式
                 [self returnJSON:@{
@@ -174,7 +175,8 @@ static NSString *const kVIPExpire     = @"4102243200"; // ~2100年
             NSLog(@"[VCAM Hook] ❌ 解析卡密响应失败: %@", e);
             [self returnJSON:@{@"code": @500, @"msg": @"服务器响应格式错误"}];
         }
-    }] resume];
+    }];
+    [task resume];
 }
 
 @end
