@@ -1,186 +1,268 @@
 /**
- * vcam_kami_hook.m
- * 
- * VCAM 虚拟相机 验证 Hook v3
- * 
- * 核心策略变更：不再绕过验证，而是让原始验证流程走通
- * 
- * 1. Hook aesDecrypt:key: 拦截并记录原始服务器 URL
- * 2. Hook NSURL+URLWithString: 重定向旧域名到我们的服务器
- * 3. 让我们的服务器返回原始 VCAM 期望的响应格式
- * 4. 原始代码自行解析响应并设置内部授权状态
- * 5. 不再手动设置 ivar / NSUserDefaults，让原始代码自己设
+ * vcam_kami_hook.m v4
+ *
+ * 核心策略：用 NSURLProtocol 拦截 VCAM 的 API 请求
+ * 直接返回 VCAM 期望的 JSON 响应格式
+ * 让原始验证流程自然走通
+ *
+ * 已知协议（从网络抓包获取）：
+ *   服务器: https://yz.xnsp.v200dd.eu.org/api.php
+ *   action=check: 设备检查 → 期望 {"code":200,"msg":{"vip":"4102243200"}}
+ *   action=use_kami: 卡密验证 → 期望 {"code":200,"msg":{"vip":"4102243200","kami":"xxx"}}
+ *   参数: udid, ts, sign(sha256), kami
+ *   响应: JSON with "code" and "msg" fields
  */
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
-#import <objc/message.h>
 
 // ============ 配置 ============
 
-static NSString *const kKamiServerHost    = @"124.221.171.80";
-static NSString *const kKamiAppID         = @"10003";
-static NSString *const kKamiApiPath       = @"/api.php";
-static NSString *const kKamiRegisterPath  = @"/trollstore-device-api.php";
+static NSString *const kKamiServer    = @"124.221.171.80";
+static NSString *const kKamiAppID     = @"10003";
+static NSString *const kVIPExpire     = @"4102243200"; // ~2100年
 
-/// 需要重定向的旧域名
-static NSString *const kOldDomain1 = @"vcam.lengye.top";
-static NSString *const kOldDomain2 = @"xnsp.v200dd.eu.org";
+// ============ VCamURLProtocol ============
 
-// ============ 原始实现指针 ============
+@interface VCamURLProtocol : NSURLProtocol
+@end
 
-static id    (*orig_aesDecrypt)(id, SEL, id, id);
-static NSURL* (*orig_URLWithString)(id, SEL, NSString*);
+@implementation VCamURLProtocol
 
-// ============ Swizzle 辅助 ============
-
-static IMP swizzleInstanceMethod(Class cls, SEL sel, IMP newImp) {
-    Method m = class_getInstanceMethod(cls, sel);
-    if (!m) return NULL;
-    return method_setImplementation(m, newImp);
-}
-
-static IMP swizzleClassMethod(Class cls, SEL sel, IMP newImp) {
-    Method m = class_getClassMethod(cls, sel);
-    if (!m) return NULL;
-    return method_setImplementation(m, newImp);
-}
-
-// ============ Hook 实现 ============
-
-#pragma mark - Hook: aesDecrypt:key: (记录解密后的URL)
-
-static id hook_aesDecrypt(id self, SEL _cmd, id encryptedData, id key) {
-    id result = orig_aesDecrypt(self, _cmd, encryptedData, key);
-    
-    if ([result isKindOfClass:[NSString class]]) {
-        NSString *decrypted = (NSString *)result;
-        if ([decrypted hasPrefix:@"http"]) {
-            NSLog(@"[VCAM Hook] 🔓 aesDecrypt 解密出URL: %@", decrypted);
-        }
-    } else if ([result isKindOfClass:[NSData class]]) {
-        NSData *data = (NSData *)result;
-        NSString *str = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-        if (str && [str hasPrefix:@"http"]) {
-            NSLog(@"[VCAM Hook] 🔓 aesDecrypt 解密出URL(data): %@", str);
-        }
++ (BOOL)canInitWithRequest:(NSURLRequest *)request {
+    NSString *host = request.URL.host;
+    // 匹配 VCAM 的验证服务器域名
+    if ([host containsString:@"xnsp"] ||
+        [host containsString:@"v200dd"] ||
+        [host containsString:@"lengye"]) {
+        return YES;
     }
-    
-    return result;
+    return NO;
 }
 
-#pragma mark - Hook: NSURL + URLWithString: (域名重定向)
++ (NSURLRequest *)canonicalRequestForRequest:(NSURLRequest *)request {
+    return request;
+}
 
-static NSURL* hook_URLWithString(id self, SEL _cmd, NSString *urlString) {
-    if (urlString) {
-        // 记录所有 VCAM 相关的 URL 请求
-        if ([urlString containsString:@"lengye"] || 
-            [urlString containsString:@"xnsp"] ||
-            [urlString containsString:@"vcam"] ||
-            [urlString containsString:@"kami"]) {
-            NSLog(@"[VCAM Hook] 🌐 URL请求: %@", urlString);
+- (void)startLoading {
+    NSString *urlStr = self.request.URL.absoluteString;
+    NSLog(@"[VCAM Hook] 🛑 拦截请求: %@", urlStr);
+    
+    if ([urlStr containsString:@"action=check"]) {
+        // 设备检查 → 直接返回已授权
+        NSLog(@"[VCAM Hook] 📋 action=check → 返回已授权");
+        [self returnJSON:@{
+            @"code": @200,
+            @"msg": @{@"vip": kVIPExpire}
+        }];
+        
+    } else if ([urlStr containsString:@"action=use_kami"]) {
+        // 卡密验证 → 先去我们的服务器验证卡密
+        NSString *kami = [self queryParam:@"kami" fromURL:self.request.URL];
+        NSString *udid = [self queryParam:@"udid" fromURL:self.request.URL];
+        
+        NSLog(@"[VCAM Hook] 🔑 action=use_kami: kami=%@ udid=%@", kami, udid);
+        
+        if (kami.length > 0) {
+            [self validateKami:kami udid:udid ?: @""];
+        } else {
+            [self returnJSON:@{@"code": @400, @"msg": @"卡密不能为空"}];
         }
         
-        // 重定向旧域名到我们的服务器
-        if ([urlString containsString:kOldDomain1]) {
-            NSString *newUrl = [urlString stringByReplacingOccurrencesOfString:kOldDomain1
-                                                                   withString:kKamiServerHost];
-            NSLog(@"[VCAM Hook] 🔄 重定向: %@ -> %@", urlString, newUrl);
-            urlString = newUrl;
-        }
-        if ([urlString containsString:kOldDomain2]) {
-            NSString *newUrl = [urlString stringByReplacingOccurrencesOfString:kOldDomain2
-                                                                   withString:kKamiServerHost];
-            NSLog(@"[VCAM Hook] 🔄 重定向: %@ -> %@", urlString, newUrl);
-            urlString = newUrl;
-        }
+    } else {
+        // 其他请求也返回成功
+        NSLog(@"[VCAM Hook] 📋 未知action → 返回已授权");
+        [self returnJSON:@{
+            @"code": @200,
+            @"msg": @{@"vip": kVIPExpire}
+        }];
     }
-    return orig_URLWithString(self, _cmd, urlString);
 }
 
-// ============ 安装 Hooks ============
+- (void)stopLoading {
+    // Nothing
+}
 
-static void installHooks() {
-    @autoreleasepool {
-        // 1. Hook NSURL + URLWithString: (域名重定向)
-        Class nsurlClass = objc_getClass("NSURL");
-        if (nsurlClass) {
-            orig_URLWithString = (void*)swizzleClassMethod(
-                nsurlClass, @selector(URLWithString:), (IMP)hook_URLWithString);
-            if (orig_URLWithString) {
-                NSLog(@"[VCAM Hook] ✅ NSURL + URLWithString: swizzled");
-            }
+#pragma mark - 辅助方法
+
+- (NSString *)queryParam:(NSString *)key fromURL:(NSURL *)url {
+    NSURLComponents *components = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+    for (NSURLQueryItem *item in components.queryItems) {
+        if ([item.name isEqualToString:key]) {
+            return item.value;
         }
-        
-        // 2. Hook aesDecrypt:key: (记录解密后的URL)
-        Class vcamClass = objc_getClass("VCamVerifyManager");
-        if (!vcamClass) {
-            NSLog(@"[VCAM Hook] ⏳ VCamVerifyManager not found yet");
+    }
+    return nil;
+}
+
+- (void)returnJSON:(NSDictionary *)json {
+    NSData *data = [NSJSONSerialization dataWithJSONObject:json options:0 error:nil];
+    NSString *jsonStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    
+    NSDictionary *headers = @{@"Content-Type": @"application/json; charset=utf-8"};
+    NSHTTPURLResponse *response = [[NSHTTPURLResponse alloc]
+        initWithURL:self.request.URL
+        statusCode:200
+        HTTPVersion:@"HTTP/1.1"
+        headerFields:headers];
+    
+    [self.client URLProtocol:self didReceiveResponse:response
+            cacheStoragePolicy:NSURLCacheStorageNotAllowed];
+    [self.client URLProtocol:self didLoadData:data];
+    [self.client URLProtocolDidFinishLoading:self];
+    
+    NSLog(@"[VCAM Hook] ✅ 返回响应: %@", jsonStr);
+}
+
+- (void)validateKami:(NSString *)kami udid:(NSString *)udid {
+    // 构建我们服务器的验证URL
+    NSString *encodedKami = [kami stringByAddingPercentEncodingWithAllowedCharacters:
+                             [NSCharacterSet URLQueryAllowedCharacterSet]];
+    NSString *encodedUdid = [udid stringByAddingPercentEncodingWithAllowedCharacters:
+                             [NSCharacterSet URLQueryAllowedCharacterSet]];
+    
+    NSString *urlStr = [NSString stringWithFormat:
+        @"http://%@/api.php?api=kmlogon&app=%@&kami=%@&markcode=%@",
+        kKamiServer, kKamiAppID, encodedKami, encodedUdid];
+    
+    NSLog(@"[VCAM Hook] 🌐 验证卡密: %@", urlStr);
+    
+    // 用独立 session 避免递归（不触发我们的 protocol）
+    NSURLSessionConfiguration *config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
+    NSURLRequest *request = [NSURLRequest requestWithURL:[NSURL URLWithString:urlStr]
+                                             cachePolicy:NSURLRequestReloadIgnoringCacheData
+                                         timeoutInterval:15.0];
+    
+    [[[session dataTaskWithRequest:request
+                 completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (error || !data) {
+            NSLog(@"[VCAM Hook] ❌ 卡密验证网络错误: %@", error.localizedDescription);
+            [self returnJSON:@{@"code": @500, @"msg": @"网络连接失败"}];
             return;
         }
         
-        NSLog(@"[VCAM Hook] ✅ Found VCamVerifyManager");
-        
-        // 打印所有 ivar（调试）
-        unsigned int ivarCount = 0;
-        Ivar *ivars = class_copyIvarList(vcamClass, &ivarCount);
-        NSLog(@"[VCAM Hook] 📋 VCamVerifyManager ivars (%u):", ivarCount);
-        for (unsigned int i = 0; i < ivarCount; i++) {
-            const char *name = ivar_getName(ivars[i]);
-            const char *type = ivar_getTypeEncoding(ivars[i]);
-            NSLog(@"[VCAM Hook]   [%u] %s (%s)", i, name ?: "?", type ?: "?");
+        @try {
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            NSInteger serverCode = [json[@"code"] integerValue];
+            
+            NSLog(@"[VCAM Hook] 📨 卡密服务器响应: code=%ld msg=%@", (long)serverCode, json[@"msg"]);
+            
+            if (serverCode == 200) {
+                // 卡密有效 → 注册设备
+                NSString *regUrl = [NSString stringWithFormat:
+                    @"http://%@/trollstore-device-api.php?api=ts_register&markcode=%@&kami=%@&model=iPhone&ios=17.0",
+                    kKamiServer, encodedUdid, encodedKami];
+                [[[NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration ephemeralSessionConfiguration]]
+                  dataTaskWithURL:[NSURL URLWithString:regUrl]] resume];
+                
+                // 返回 VCAM 期望的格式
+                [self returnJSON:@{
+                    @"code": @200,
+                    @"msg": @{@"vip": kVIPExpire, @"kami": kami}
+                }];
+            } else {
+                // 卡密无效
+                NSString *msg = json[@"msg"] ?: @"卡密无效或已过期";
+                if (![msg isKindOfClass:[NSString class]]) {
+                    msg = [msg description];
+                }
+                [self returnJSON:@{@"code": @401, @"msg": msg}];
+            }
+        } @catch (NSException *e) {
+            NSLog(@"[VCAM Hook] ❌ 解析卡密响应失败: %@", e);
+            [self returnJSON:@{@"code": @500, @"msg": @"服务器响应格式错误"}];
         }
-        if (ivars) free(ivars);
-        
-        // 打印所有方法（调试）
-        unsigned int methodCount = 0;
-        Method *methods = class_copyMethodList(vcamClass, &methodCount);
-        NSLog(@"[VCAM Hook] 📋 VCamVerifyManager methods (%u):", methodCount);
-        for (unsigned int i = 0; i < methodCount; i++) {
-            SEL sel = method_getName(methods[i]);
-            NSLog(@"[VCAM Hook]   - %s", sel_getName(sel));
+    }] resume];
+}
+
+@end
+
+// ============ NSURLSessionConfiguration Hook ============
+// 注入我们的 Protocol 到所有 Session Configuration
+
+static NSURLSessionConfiguration* (*orig_defaultConfig)(id, SEL);
+static NSURLSessionConfiguration* (*orig_ephemeralConfig)(id, SEL);
+
+static void injectProtocol(NSURLSessionConfiguration *config) {
+    if (!config) return;
+    NSMutableArray *protocols = [config.protocolClasses mutableCopy] ?: [NSMutableArray array];
+    
+    // 避免重复添加
+    for (Class cls in protocols) {
+        if ([cls isKindOfClass:[VCamURLProtocol class]] || cls == [VCamURLProtocol class]) {
+            return;
         }
-        if (methods) free(methods);
-        
-        // Hook aesDecrypt:key:
-        SEL aesSel = NSSelectorFromString(@"aesDecrypt:key:");
-        if (class_getInstanceMethod(vcamClass, aesSel)) {
-            orig_aesDecrypt = (void*)swizzleInstanceMethod(
-                vcamClass, aesSel, (IMP)hook_aesDecrypt);
-            NSLog(@"[VCAM Hook] ✅ aesDecrypt:key: swizzled");
-        }
-        
-        NSLog(@"[VCAM Hook] ✅ v3 hooks installed (observer mode)");
     }
+    
+    [protocols insertObject:[VCamURLProtocol class] atIndex:0];
+    config.protocolClasses = protocols;
+    NSLog(@"[VCAM Hook] 💉 注入 Protocol 到 SessionConfiguration");
+}
+
+static NSURLSessionConfiguration* hook_defaultConfig(id self, SEL _cmd) {
+    NSURLSessionConfiguration *config = orig_defaultConfig(self, _cmd);
+    injectProtocol(config);
+    return config;
+}
+
+static NSURLSessionConfiguration* hook_ephemeralConfig(id self, SEL _cmd) {
+    NSURLSessionConfiguration *config = orig_ephemeralConfig(self, _cmd);
+    injectProtocol(config);
+    return config;
 }
 
 // ============ 构造函数 ============
 
 __attribute__((constructor))
 static void vcam_hook_init() {
-    NSLog(@"[VCAM Hook] v3 Initializing (observer + redirect mode)...");
+    NSLog(@"[VCAM Hook] v4 Initializing (NSURLProtocol 拦截模式)...");
     
-    installHooks();
+    // 1. 全局注册 Protocol（对 sharedSession 和 NSURLConnection 有效）
+    [NSURLProtocol registerClass:[VCamURLProtocol class]];
+    NSLog(@"[VCAM Hook] ✅ VCamURLProtocol 全局注册完成");
     
-    // 延迟重试
-    if (!objc_getClass("VCamVerifyManager")) {
-        dispatch_after(
-            dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
-            dispatch_get_main_queue(), ^{
-                NSLog(@"[VCAM Hook] Retry 1...");
-                installHooks();
-                
-                if (!objc_getClass("VCamVerifyManager")) {
-                    dispatch_after(
-                        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
-                        dispatch_get_main_queue(), ^{
-                            NSLog(@"[VCAM Hook] Retry 2...");
-                            installHooks();
-                        });
-                }
-            });
+    // 2. Hook NSURLSessionConfiguration（对自定义 Session 有效）
+    Class configClass = objc_getClass("NSURLSessionConfiguration");
+    if (configClass) {
+        Method defMethod = class_getClassMethod(configClass, @selector(defaultSessionConfiguration));
+        Method ephMethod = class_getClassMethod(configClass, @selector(ephemeralSessionConfiguration));
+        
+        if (defMethod) {
+            orig_defaultConfig = (void*)method_setImplementation(defMethod, (IMP)hook_defaultConfig);
+            NSLog(@"[VCAM Hook] ✅ defaultSessionConfiguration swizzled");
+        }
+        if (ephMethod) {
+            orig_ephemeralConfig = (void*)method_setImplementation(ephMethod, (IMP)hook_ephemeralConfig);
+            NSLog(@"[VCAM Hook] ✅ ephemeralSessionConfiguration swizzled");
+        }
     }
     
-    NSLog(@"[VCAM Hook] v3 Init complete - 观察模式，等待原始验证流程");
+    // 3. 延迟注入已有的 SessionConfiguration 实例
+    dispatch_after(
+        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+        dispatch_get_main_queue(), ^{
+            NSLog(@"[VCAM Hook] 🔄 延迟检查...");
+            
+            // 打印 VCamVerifyManager 信息
+            Class vcamClass = objc_getClass("VCamVerifyManager");
+            if (vcamClass) {
+                NSLog(@"[VCAM Hook] ✅ VCamVerifyManager 已加载");
+                
+                unsigned int methodCount = 0;
+                Method *methods = class_copyMethodList(vcamClass, &methodCount);
+                NSLog(@"[VCAM Hook] 📋 方法列表 (%u):", methodCount);
+                for (unsigned int i = 0; i < methodCount; i++) {
+                    SEL sel = method_getName(methods[i]);
+                    NSLog(@"[VCAM Hook]   - %s", sel_getName(sel));
+                }
+                if (methods) free(methods);
+            }
+        });
+    
+    NSLog(@"[VCAM Hook] v4 Init complete - NSURLProtocol 拦截已激活");
+    NSLog(@"[VCAM Hook] 拦截域名: *xnsp*, *v200dd*, *lengye*");
+    NSLog(@"[VCAM Hook] action=check → 自动授权");
+    NSLog(@"[VCAM Hook] action=use_kami → 验证卡密(服务器: %@)", kKamiServer);
 }
