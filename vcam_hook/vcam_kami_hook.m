@@ -110,19 +110,7 @@ static NSInteger verifyKamiSync(NSString *kami, NSString *markcode) {
     return result;
 }
 
-// ============ Protocol 注入 ============
-
-static void injectProtocolIntoConfig(NSURLSessionConfiguration *config) {
-    if (!config) return;
-    NSMutableArray *protocols = [config.protocolClasses mutableCopy] ?: [NSMutableArray array];
-    for (Class cls in protocols) {
-        if (cls == [VCamURLProtocol class]) return;
-    }
-    [protocols insertObject:[VCamURLProtocol class] atIndex:0];
-    config.protocolClasses = protocols;
-}
-
-// ============ VCamURLProtocol ============
+// ============ VCamURLProtocol 前置声明 ============
 
 @interface VCamURLProtocol : NSURLProtocol
 @end
@@ -298,6 +286,18 @@ static void injectProtocolIntoConfig(NSURLSessionConfiguration *config) {
 }
 
 @end
+
+// ============ Protocol 注入 ============
+
+static void injectProtocolIntoConfig(NSURLSessionConfiguration *config) {
+    if (!config) return;
+    NSMutableArray *protocols = [config.protocolClasses mutableCopy] ?: [NSMutableArray array];
+    for (Class cls in protocols) {
+        if (cls == [VCamURLProtocol class]) return;
+    }
+    [protocols insertObject:[VCamURLProtocol class] atIndex:0];
+    config.protocolClasses = protocols;
+}
 
 // ============ NSURLSession Hook ============
 
