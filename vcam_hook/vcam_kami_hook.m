@@ -94,6 +94,59 @@ static NSString *getStableMarkcode(NSString *fallbackUdid) {
     return fallbackUdid ?: @"";
 }
 
+// 同步解绑卡密（把旧的 markcode 绑定清掉）
+static BOOL unbindKamiSync(NSString *kami, NSString *oldMarkcode) {
+    if (kami.length == 0 || oldMarkcode.length == 0) return NO;
+    
+    NSString *encodedKami = [kami stringByAddingPercentEncodingWithAllowedCharacters:
+                             [NSCharacterSet URLQueryAllowedCharacterSet]];
+    NSString *encodedMC = [oldMarkcode stringByAddingPercentEncodingWithAllowedCharacters:
+                           [NSCharacterSet URLQueryAllowedCharacterSet]];
+    
+    NSString *urlStr = [NSString stringWithFormat:
+        @"http://%@/api.php?api=kmunmachine&app=%@&kami=%@&markcode=%@",
+        kKamiServer, kKamiAppID, encodedKami, encodedMC];
+    
+    NSURL *url = [NSURL URLWithString:urlStr];
+    if (!url) return NO;
+    
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url
+                                                           cachePolicy:NSURLRequestReloadIgnoringCacheData
+                                                       timeoutInterval:kVerifyTimeout];
+    request.HTTPMethod = @"GET";
+    
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    __block BOOL success = NO;
+    
+    NSURLSessionConfiguration *config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    config.timeoutIntervalForRequest = kVerifyTimeout;
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
+    
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:request
+                                           completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (data) {
+            @try {
+                NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                NSInteger code = [json[@"code"] integerValue];
+                success = (code == 200);
+                NSLog(@"[VCAM Hook] 🔄 解绑结果: code=%ld success=%d", (long)code, success);
+            } @catch (NSException *e) {
+                NSLog(@"[VCAM Hook] ⚠️ 解绑响应解析失败");
+            }
+        }
+        dispatch_semaphore_signal(sem);
+    }];
+    [task resume];
+    
+    dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kVerifyTimeout * NSEC_PER_SEC));
+    if (dispatch_semaphore_wait(sem, timeout) != 0) {
+        NSLog(@"[VCAM Hook] ⚠️ 解绑超时");
+        return NO;
+    }
+    
+    return success;
+}
+
 static NSInteger verifyKamiSync(NSString *kami, NSString *markcode) {
     if (kami.length == 0 || markcode.length == 0) return 0;
     
@@ -212,6 +265,12 @@ static NSInteger verifyKamiSync(NSString *kami, NSString *markcode) {
     NSString *markcode = getStableMarkcode(savedMC);
     NSLog(@"[VCAM Hook] 🔄 已激活，同步验证卡密状态... savedMC=%@ stableMC=%@", savedMC, markcode);
 
+    // 如果 markcode 变了，先解绑旧的再重新验证
+    if (savedMC.length > 0 && ![savedMC isEqualToString:markcode]) {
+        NSLog(@"[VCAM Hook] 🔄 检测到 markcode 变化，先解绑旧绑定...");
+        unbindKamiSync(kami, savedMC);
+    }
+
     NSInteger result = verifyKamiSync(kami, markcode);
     
     switch (result) {
@@ -238,6 +297,13 @@ static NSInteger verifyKamiSync(NSString *kami, NSString *markcode) {
 - (void)validateKami:(NSString *)kami udid:(NSString *)udid {
     // 使用稳定标识（序列号 > UDID > 传入的 udid）
     NSString *stableMarkcode = getStableMarkcode(udid);
+    
+    // 如果保存的旧 markcode 和新的稳定标识不同，先解绑旧的
+    NSString *oldMC = savedMarkcode();
+    if (oldMC.length > 0 && ![oldMC isEqualToString:stableMarkcode]) {
+        NSLog(@"[VCAM Hook] 🔄 检测到 markcode 变化(旧=%@ 新=%@)，先解绑旧绑定...", oldMC, stableMarkcode);
+        unbindKamiSync(kami, oldMC);
+    }
     
     NSString *encodedKami = [kami stringByAddingPercentEncodingWithAllowedCharacters:
                              [NSCharacterSet URLQueryAllowedCharacterSet]];
