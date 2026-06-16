@@ -10,6 +10,7 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <sys/sysctl.h>
 
 // ============ 配置 ============
 
@@ -53,6 +54,43 @@ static void clearActivated() {
     [ud removeObjectForKey:kKeyMarkcode];
     [ud synchronize];
     NSLog(@"[VCAM Hook] 🗑️ 激活记录已清除");
+}
+
+static NSString *getDeviceSerial() {
+    size_t size = 0;
+    sysctlbyname("hw.serialnumber", NULL, &size, NULL, 0);
+    if (size > 0) {
+        char *buf = (char *)malloc(size);
+        sysctlbyname("hw.serialnumber", buf, &size, NULL, 0);
+        NSString *serial = [NSString stringWithUTF8String:buf];
+        free(buf);
+        serial = [serial stringByTrimmingCharactersInSet:[NSCharacterSet controlCharacterSet]];
+        if (serial.length > 0) return serial;
+    }
+    return @"";
+}
+
+static NSString *getDeviceUDID() {
+    void *handle = dlopen("/usr/lib/libMobileGestalt.dylib", RTLD_LAZY);
+    if (!handle) return nil;
+    typedef CFTypeRef (*MGCopyAnswerFunc)(CFStringRef);
+    MGCopyAnswerFunc MGCopyAnswer = (MGCopyAnswerFunc)dlsym(handle, "MGCopyAnswer");
+    if (!MGCopyAnswer) { dlclose(handle); return nil; }
+    CFTypeRef result = MGCopyAnswer(CFSTR("UniqueDeviceID"));
+    dlclose(handle);
+    if (!result) return nil;
+    if (CFGetTypeID(result) != CFStringGetTypeID()) { CFRelease(result); return nil; }
+    NSString *udid = (__bridge_transfer NSString *)result;
+    return udid.length > 0 ? udid : nil;
+}
+
+// 获取稳定的设备标识：序列号 > UDID > 传入的 udid
+static NSString *getStableMarkcode(NSString *fallbackUdid) {
+    NSString *serial = getDeviceSerial();
+    if (serial.length > 0) return serial;
+    NSString *udid = getDeviceUDID();
+    if (udid.length > 0) return udid;
+    return fallbackUdid ?: @"";
 }
 
 static NSInteger verifyKamiSync(NSString *kami, NSString *markcode) {
@@ -168,14 +206,18 @@ static NSInteger verifyKamiSync(NSString *kami, NSString *markcode) {
     }
     
     NSString *kami = savedKami();
-    NSString *markcode = savedMarkcode();
-    NSLog(@"[VCAM Hook] 🔄 已激活，同步验证卡密状态...");
-    
+    NSString *savedMC = savedMarkcode();
+    // 用稳定标识替换可能过期的 markcode
+    NSString *markcode = getStableMarkcode(savedMC);
+    NSLog(@"[VCAM Hook] 🔄 已激活，同步验证卡密状态... savedMC=%@ stableMC=%@", savedMC, markcode);
+
     NSInteger result = verifyKamiSync(kami, markcode);
     
     switch (result) {
         case 1:
             NSLog(@"[VCAM Hook] ✅ 卡密有效，返回授权");
+            // 更新保存的 markcode 为稳定标识
+            setActivated(kami, markcode);
             [self returnJSON:@{@"code": @200, @"msg": @{@"vip": kVIPExpire}}];
             break;
         case 0:
@@ -193,14 +235,17 @@ static NSInteger verifyKamiSync(NSString *kami, NSString *markcode) {
 #pragma mark - 卡密验证
 
 - (void)validateKami:(NSString *)kami udid:(NSString *)udid {
+    // 使用稳定标识（序列号 > UDID > 传入的 udid）
+    NSString *stableMarkcode = getStableMarkcode(udid);
+    
     NSString *encodedKami = [kami stringByAddingPercentEncodingWithAllowedCharacters:
                              [NSCharacterSet URLQueryAllowedCharacterSet]];
-    NSString *encodedUdid = [udid stringByAddingPercentEncodingWithAllowedCharacters:
-                             [NSCharacterSet URLQueryAllowedCharacterSet]];
-    
+    NSString *encodedMC = [stableMarkcode stringByAddingPercentEncodingWithAllowedCharacters:
+                           [NSCharacterSet URLQueryAllowedCharacterSet]];
+
     NSString *urlStr = [NSString stringWithFormat:
         @"http://%@/api.php?api=kmlogon&app=%@&kami=%@&markcode=%@",
-        kKamiServer, kKamiAppID, encodedKami, encodedUdid];
+        kKamiServer, kKamiAppID, encodedKami, encodedMC];
     
     NSLog(@"[VCAM Hook] 🌐 验证卡密: %@", urlStr);
     
@@ -225,11 +270,14 @@ static NSInteger verifyKamiSync(NSString *kami, NSString *markcode) {
             NSLog(@"[VCAM Hook] 📨 卡密服务器响应: code=%ld", (long)serverCode);
             
             if (serverCode == 200) {
-                setActivated(kami, udid);
+                setActivated(kami, stableMarkcode);
                 
                 NSString *regUrl = [NSString stringWithFormat:
-                    @"http://%@/trollstore-device-api.php?api=ts_register&markcode=%@&kami=%@&model=iPhone&ios=17.0",
-                    kKamiServer, encodedUdid, encodedKami];
+                    @"http://%@/trollstore-device-api.php?api=ts_register&serial=%@&udid=%@&markcode=%@&kami=%@&model=iPhone&ios=17.0",
+                    kKamiServer,
+                    [getDeviceSerial() stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]],
+                    [(getDeviceUDID() ?: @"") stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]],
+                    encodedMC, encodedKami];
                 NSURLSessionConfiguration *regConfig = [NSURLSessionConfiguration ephemeralSessionConfiguration];
                 NSURLSession *regSession = [NSURLSession sessionWithConfiguration:regConfig];
                 NSURLSessionDataTask *regTask = [regSession dataTaskWithURL:[NSURL URLWithString:regUrl]];
