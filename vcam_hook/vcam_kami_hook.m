@@ -11,6 +11,7 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <sys/sysctl.h>
+#import <dlfcn.h>
 
 // ============ 配置 ============
 
