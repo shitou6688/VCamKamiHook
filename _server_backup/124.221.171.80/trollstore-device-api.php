@@ -24,8 +24,12 @@ if (isset($_GET['api'])) {
     $api = $mysqli->real_escape_string($_GET['api']);
     switch ($api) {
         case 'vcam_verify': vcam_verify($mysqli); break;
-        case 'vcam_admin_add': vcam_admin_add($mysqli); break;
         case 'vcam_admin_list': vcam_admin_list($mysqli); break;
+        case 'vcam_admin_add': vcam_admin_add($mysqli); break;
+        case 'vcam_admin_toggle': vcam_admin_toggle($mysqli); break;
+        case 'vcam_admin_delete': vcam_admin_delete($mysqli); break;
+        case 'vcam_admin_unbind': vcam_admin_unbind($mysqli); break;
+        case 'vcam_admin_stats': vcam_admin_stats($mysqli); break;
         case 'ts_verify': ts_verify($mysqli); break;
         case 'ts_register': ts_register($mysqli); break;
         case 'ts_check': ts_check($mysqli); break;
@@ -242,6 +246,49 @@ function vcam_admin_list($mysqli) {
     $rows = [];
     while ($row = $res->fetch_assoc()) $rows[] = $row;
     echo json_encode(['code' => 200, 'data' => $rows]);
+}
+
+function vcam_admin_toggle($mysqli) {
+    global $ADMIN_KEY;
+    if (!isset($_GET['key']) || $_GET['key'] !== $ADMIN_KEY) { echo json_encode(['code' => 403]); return; }
+    _vcam_init_table($mysqli);
+    $id = intval($_GET['id'] ?? 0);
+    if ($id <= 0) { echo json_encode(['code' => 400]); return; }
+    $res = $mysqli->query("SELECT status FROM vcam_device_kamis WHERE id = $id");
+    if (!$res || $res->num_rows == 0) { echo json_encode(['code' => 404, 'msg' => '卡密不存在']); return; }
+    $cur = $res->fetch_assoc()['status'];
+    $next = ($cur === 'active') ? 'disabled' : 'active';
+    $mysqli->query("UPDATE vcam_device_kamis SET status = '$next' WHERE id = $id");
+    echo json_encode(['code' => 200, 'msg' => "状态已改为 $next"]);
+}
+
+function vcam_admin_delete($mysqli) {
+    global $ADMIN_KEY;
+    if (!isset($_GET['key']) || $_GET['key'] !== $ADMIN_KEY) { echo json_encode(['code' => 403]); return; }
+    $id = intval($_GET['id'] ?? 0);
+    if ($id <= 0) { echo json_encode(['code' => 400]); return; }
+    $mysqli->query("DELETE FROM vcam_device_kamis WHERE id = $id");
+    echo json_encode(['code' => 200, 'msg' => '已删除']);
+}
+
+function vcam_admin_unbind($mysqli) {
+    global $ADMIN_KEY;
+    if (!isset($_GET['key']) || $_GET['key'] !== $ADMIN_KEY) { echo json_encode(['code' => 403]); return; }
+    $id = intval($_GET['id'] ?? 0);
+    if ($id <= 0) { echo json_encode(['code' => 400]); return; }
+    $mysqli->query("UPDATE vcam_device_kamis SET device_serial='', device_udid='', device_markcode='', device_model='', ios_version='', activated_at=NULL, last_active=NULL WHERE id = $id");
+    echo json_encode(['code' => 200, 'msg' => '已解绑']);
+}
+
+function vcam_admin_stats($mysqli) {
+    global $ADMIN_KEY;
+    if (!isset($_GET['key']) || $_GET['key'] !== $ADMIN_KEY) { echo json_encode(['code' => 403]); return; }
+    _vcam_init_table($mysqli);
+    $total = $mysqli->query("SELECT COUNT(*) as c FROM vcam_device_kamis")->fetch_assoc()['c'];
+    $active = $mysqli->query("SELECT COUNT(*) as c FROM vcam_device_kamis WHERE status='active'")->fetch_assoc()['c'];
+    $bound = $mysqli->query("SELECT COUNT(*) as c FROM vcam_device_kamis WHERE activated_at IS NOT NULL")->fetch_assoc()['c'];
+    $disabled = $mysqli->query("SELECT COUNT(*) as c FROM vcam_device_kamis WHERE status='disabled'")->fetch_assoc()['c'];
+    echo json_encode(['code' => 200, 'total' => intval($total), 'active' => intval($active), 'bound' => intval($bound), 'disabled' => intval($disabled)]);
 }
 
 function ts_admin_config($mysqli) {

@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VCam 卡密管理</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f1923;color:#e0e6ed}
+.login-wrap{display:flex;justify-content:center;align-items:center;min-height:100vh}
+.login-box{background:#1a2634;border-radius:16px;padding:40px;width:360px;box-shadow:0 20px 60px rgba(0,0,0,.3);text-align:center}
+.login-box h1{font-size:20px;color:#fff;margin-bottom:8px}
+.login-box p{font-size:14px;color:#7a8b9a;margin-bottom:24px}
+.login-box input{width:100%;padding:10px 14px;border:1px solid #2d3d4e;border-radius:8px;font-size:15px;text-align:center;margin-bottom:16px;background:#0f1923;color:#e0e6ed}
+.login-box input:focus{outline:none;border-color:#4a9eff}
+.login-btn{width:100%;padding:10px;background:#4a9eff;color:#fff;border:none;border-radius:8px;font-size:15px;cursor:pointer;font-weight:500}
+.login-btn:hover{background:#3a8eef}
+.login-error{color:#ff6b6b;font-size:13px;margin-top:8px;display:none}
+.app{display:none}
+.header{display:flex;justify-content:space-between;align-items:center;padding:14px 20px;background:#1a2634;border-bottom:1px solid #2d3d4e}
+.header h1{font-size:18px;color:#fff}
+.btn{padding:6px 14px;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:500}
+.btn-primary{background:#4a9eff;color:#fff}.btn-danger{background:#ff4757;color:#fff}
+.btn-success{background:#2ed573;color:#fff}.btn-outline{background:transparent;border:1px solid #2d3d4e;color:#7a8b9a}
+.btn-warning{background:#ffa502;color:#333}
+.btn-sm{padding:4px 10px;font-size:12px}
+.stats-bar{display:flex;gap:12px;padding:16px 20px}
+.stat-card{flex:1;background:#1a2634;border-radius:10px;padding:14px 16px}
+.stat-card .num{font-size:26px;font-weight:700}.stat-card .label{font-size:12px;color:#5a6b7a;margin-top:2px}
+.c-blue{color:#4a9eff}.c-green{color:#2ed573}.c-red{color:#ff4757}.c-orange{color:#ffa502}
+.toolbar{display:flex;gap:10px;align-items:center;padding:0 20px 12px;flex-wrap:wrap}
+.toolbar input,.toolbar select{padding:8px 12px;border:1px solid #2d3d4e;border-radius:6px;font-size:13px;background:#0f1923;color:#e0e6ed}
+.toolbar input{width:200px}
+.toolbar input::placeholder{color:#5a6b7a}
+.table-wrap{background:#1a2634;margin:0 20px;border-radius:10px;overflow-x:auto}
+table{width:100%;border-collapse:collapse;min-width:700px}
+th{background:#162230;padding:10px 8px;text-align:left;font-size:11px;font-weight:600;color:#5a6b7a;border-bottom:1px solid #2d3d4e;white-space:nowrap}
+td{padding:8px 8px;border-bottom:1px solid #1e2f40;font-size:13px;white-space:nowrap;color:#c0ccda}
+tr:hover td{background:#1e2f40}
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:500}
+.b-active{background:#1a3a2a;color:#2ed573}.b-disabled{background:#3a1a1a;color:#ff4757}
+.b-bound{background:#1a2a3a;color:#4a9eff}.b-unbound{background:#2a2a1a;color:#ffa502}
+.mono{font-family:'SF Mono',Consolas,monospace;font-size:12px}
+.kami-val{font-weight:600;color:#4a9eff;font-family:'SF Mono',Consolas,monospace}
+.empty{text-align:center;padding:40px;color:#5a6b7a;font-size:14px}
+.modal-bg{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);z-index:100;justify-content:center;align-items:center}
+.modal-bg.active{display:flex}
+.modal{background:#1a2634;border-radius:12px;padding:24px;width:420px;max-width:90vw;border:1px solid #2d3d4e;max-height:80vh;overflow-y:auto}
+.modal h3{margin-bottom:16px;font-size:16px;color:#fff}
+.modal label{display:block;margin-bottom:4px;font-size:12px;color:#5a6b7a;font-weight:500}
+.modal input,.modal select,.modal textarea{width:100%;padding:8px 12px;border:1px solid #2d3d4e;border-radius:6px;font-size:13px;margin-bottom:10px;background:#0f1923;color:#e0e6ed}
+.modal textarea{height:80px;resize:vertical}
+.modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:8px}
+.generated-kamis{max-height:200px;overflow:auto;background:#0f1923;border-radius:6px;padding:10px;font-family:'SF Mono',Consolas,monospace;font-size:12px;line-height:2;word-break:break-all}
+</style>
+</head>
+<body>
+
+<div class="login-wrap" id="loginWrap">
+  <div class="login-box">
+    <h1>🔐 VCam 卡密管理</h1>
+    <p>输入管理员 Key 登录</p>
+    <input type="password" id="keyInput" placeholder="Admin Key" onkeydown="if(event.key==='Enter')login()">
+    <button class="login-btn" onclick="login()">登 录</button>
+    <div class="login-error" id="loginError">Key 错误</div>
+  </div>
+</div>
+
+<div class="app" id="app">
+  <div class="header">
+    <h1>🎥 VCam 独立卡密管理</h1>
+    <button class="btn btn-outline" onclick="logout()">退出</button>
+  </div>
+
+  <div class="stats-bar" id="statsBar">
+    <div class="stat-card"><div class="num c-blue" id="statTotal">-</div><div class="label">总卡密</div></div>
+    <div class="stat-card"><div class="num c-green" id="statActive">-</div><div class="label">可用</div></div>
+    <div class="stat-card"><div class="num c-orange" id="statBound">-</div><div class="label">已激活</div></div>
+    <div class="stat-card"><div class="num c-red" id="statDisabled">-</div><div class="label">已禁用</div></div>
+  </div>
+
+  <div class="toolbar">
+    <input type="text" id="searchInput" placeholder="搜索卡密/设备序列号..." oninput="loadList()">
+    <select id="statusFilter" onchange="loadList()">
+      <option value="">全部状态</option>
+      <option value="active">可用</option>
+      <option value="disabled">已禁用</option>
+    </select>
+    <button class="btn btn-success" onclick="showAddModal()">+ 添加单张</button>
+    <button class="btn btn-primary" onclick="showBatchModal()">⚡ 批量生成</button>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th><th>卡密</th><th>状态</th><th>绑定状态</th>
+          <th>设备序列号</th><th>设备UDID</th><th>型号</th><th>iOS</th>
+          <th>激活时间</th><th>最近活跃</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="kamiBody"><tr><td colspan="11" class="empty">加载中...</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- 添加单张 Modal -->
+<div class="modal-bg" id="addModal">
+  <div class="modal">
+    <h3>添加卡密</h3>
+    <label>卡密</label>
+    <input type="text" id="addKami" placeholder="输入卡密或留空自动生成">
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeModal('addModal')">取消</button>
+      <button class="btn btn-primary" onclick="addKami()">添 加</button>
+    </div>
+  </div>
+</div>
+
+<!-- 批量生成 Modal -->
+<div class="modal-bg" id="batchModal">
+  <div class="modal">
+    <h3>批量生成卡密</h3>
+    <label>数量</label>
+    <input type="number" id="batchCount" value="10" min="1" max="100">
+    <label>前缀（可选）</label>
+    <input type="text" id="batchPrefix" placeholder="如 VCAM_">
+    <label>长度（不含前缀，默认16）</label>
+    <select id="batchLen">
+      <option value="12">12</option><option value="16" selected>16</option>
+      <option value="20">20</option><option value="24">24</option>
+    </select>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeModal('batchModal')">取消</button>
+      <button class="btn btn-primary" onclick="batchGenerate()">生 成</button>
+    </div>
+    <div class="generated-kamis" id="genResult" style="display:none"></div>
+  </div>
+</div>
+
+<script>
+let ADMIN_KEY = '';
+const API_BASE = 'trollstore-device-api.php';
+
+function api(action, params = {}) {
+  const qs = new URLSearchParams({ ...params, api: action, key: ADMIN_KEY });
+  return fetch(`${API_BASE}?${qs}`).then(r => r.json());
+}
+
+function login() {
+  ADMIN_KEY = document.getElementById('keyInput').value.trim();
+  if (!ADMIN_KEY) return;
+  api('vcam_admin_stats').then(r => {
+    if (r.code === 200) {
+      document.getElementById('loginWrap').style.display = 'none';
+      document.getElementById('app').style.display = 'block';
+      loadStats(); loadList();
+    } else { document.getElementById('loginError').style.display = 'block'; }
+  }).catch(() => { document.getElementById('loginError').style.display = 'block'; });
+}
+
+function logout() {
+  ADMIN_KEY = '';
+  document.getElementById('loginWrap').style.display = 'flex';
+  document.getElementById('app').style.display = 'none';
+}
+
+function loadStats() {
+  api('vcam_admin_stats').then(r => {
+    document.getElementById('statTotal').textContent = r.total || 0;
+    document.getElementById('statActive').textContent = r.active || 0;
+    document.getElementById('statBound').textContent = r.bound || 0;
+    document.getElementById('statDisabled').textContent = r.disabled || 0;
+  });
+}
+
+function loadList() {
+  const search = document.getElementById('searchInput').value.trim();
+  const status = document.getElementById('statusFilter').value;
+  api('vcam_admin_list').then(r => {
+    if (r.code !== 200) return;
+    let rows = r.data || [];
+    if (search) {
+      const s = search.toLowerCase();
+      rows = rows.filter(r => (r.kami||'').toLowerCase().includes(s) || (r.device_serial||'').toLowerCase().includes(s));
+    }
+    if (status) rows = rows.filter(r => r.status === status);
+
+    const tbody = document.getElementById('kamiBody');
+    if (rows.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="11" class="empty">无数据</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rows.map(r => {
+      const bound = r.activated_at ? 'bound' : 'unbound';
+      return `<tr>
+        <td>${r.id}</td>
+        <td><span class="kami-val">${esc(r.kami)}</span></td>
+        <td><span class="badge ${r.status==='active'?'b-active':'b-disabled'}">${r.status==='active'?'可用':'禁用'}</span></td>
+        <td><span class="badge ${bound==='bound'?'b-bound':'b-unbound'}">${bound==='bound'?'已激活':'未激活'}</span></td>
+        <td class="mono">${esc(r.device_serial)||'-'}</td>
+        <td class="mono">${esc(r.device_udid||'').slice(0,16)}${r.device_udid?'...':'-'}</td>
+        <td>${esc(r.device_model)||'-'}</td>
+        <td>${esc(r.ios_version)||'-'}</td>
+        <td>${r.activated_at||'-'}</td>
+        <td>${r.last_active||'-'}</td>
+        <td>
+          <button class="btn btn-sm btn-warning" onclick="toggleKami(${r.id})">${r.status==='active'?'禁用':'启用'}</button>
+          ${bound==='bound'?`<button class="btn btn-sm btn-outline" onclick="unbindKami(${r.id})">解绑</button>`:''}
+          <button class="btn btn-sm btn-danger" onclick="deleteKami(${r.id})">删除</button>
+        </td>
+      </tr>`;
+    }).join('');
+  });
+}
+
+function showAddModal() { document.getElementById('addModal').classList.add('active'); document.getElementById('addKami').value = ''; }
+function showBatchModal() { document.getElementById('batchModal').classList.add('active'); document.getElementById('genResult').style.display = 'none'; }
+function closeModal(id) { document.getElementById(id).classList.remove('active'); }
+
+function addKami() {
+  let kami = document.getElementById('addKami').value.trim();
+  if (!kami) {
+    // 自动生成
+    api('vcam_admin_add', { count: 1 }).then(r => {
+      if (r.code === 200) { closeModal('addModal'); loadStats(); loadList(); }
+      else alert(r.msg);
+    });
+  } else {
+    api('vcam_admin_add', { kami }).then(r => {
+      if (r.code === 200) { closeModal('addModal'); loadStats(); loadList(); }
+      else alert(r.msg);
+    });
+  }
+}
+
+function batchGenerate() {
+  const count = parseInt(document.getElementById('batchCount').value) || 10;
+  const prefix = document.getElementById('batchPrefix').value.trim();
+  const len = parseInt(document.getElementById('batchLen').value) || 16;
+  const genDiv = document.getElementById('genResult');
+
+  // 批量生成
+  api('vcam_admin_add', { count }).then(r => {
+    if (r.code === 200 && r.kamis) {
+      let kamis = r.kamis;
+      if (prefix) kamis = kamis.map(k => prefix + k);
+      // 如果有前缀，需要单独插入
+      if (prefix) {
+        let done = 0;
+        kamis.forEach(k => {
+          api('vcam_admin_add', { kami: k }).then(() => { done++; if (done === kamis.length) finish(); });
+        });
+      } else {
+        finish();
+      }
+      function finish() {
+        genDiv.style.display = 'block';
+        genDiv.innerHTML = kamis.map(k => `<div>${esc(k)}</div>`).join('');
+        loadStats(); loadList();
+      }
+    } else alert(r.msg || '生成失败');
+  });
+}
+
+function toggleKami(id) {
+  if (!confirm('确定切换该卡密状态？')) return;
+  api('vcam_admin_toggle', { id }).then(r => { if (r.code === 200) { loadStats(); loadList(); } else alert(r.msg); });
+}
+
+function unbindKami(id) {
+  if (!confirm('确定解绑该卡密？解绑后设备需重新激活。')) return;
+  api('vcam_admin_unbind', { id }).then(r => { if (r.code === 200) { loadStats(); loadList(); } else alert(r.msg); });
+}
+
+function deleteKami(id) {
+  if (!confirm('确定删除该卡密？此操作不可恢复！')) return;
+  api('vcam_admin_delete', { id }).then(r => { if (r.code === 200) { loadStats(); loadList(); } else alert(r.msg); });
+}
+
+function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+</script>
+</body>
+</html>
