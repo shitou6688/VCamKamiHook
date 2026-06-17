@@ -33,6 +33,7 @@ jobs:
             vcam_kami_hook.m \
             -framework Foundation \
             -framework UIKit \
+            -framework IOKit \
             -lobjc
 
       - name: Build arm64e dylib
@@ -47,6 +48,7 @@ jobs:
             vcam_kami_hook.m \
             -framework Foundation \
             -framework UIKit \
+            -framework IOKit \
             -lobjc
 
       - name: Create fat binary

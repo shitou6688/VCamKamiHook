@@ -1,8 +1,9 @@
 /**
- * vcam_kami_hook.m v8
+ * vcam_kami_hook.m v8.1
  *
- * 独立卡密系统 — 不依赖 yixi/10003，直接查 vcam_device_kamis 表
+ * 独立卡密系统 — 不依赖 yixi/10003，直接查 vcam_keys 表
  * 绑定序列号+UDID，刷机还原不变，多App共用同一台设备不冲突
+ * v8.1: IOKit 读序列号 + MobileGestalt UDID，兜底用 markcode 写入 device_serial
  */
 
 #import <Foundation/Foundation.h>
@@ -10,6 +11,7 @@
 #import <objc/runtime.h>
 #import <sys/sysctl.h>
 #import <dlfcn.h>
+#import <IOKit/IOKitLib.h>
 
 // ============ 配置 ============
 
@@ -55,15 +57,20 @@ static void clearActivated() {
 }
 
 static NSString *getDeviceSerial() {
-    size_t size = 0;
-    sysctlbyname("hw.serialnumber", NULL, &size, NULL, 0);
-    if (size > 0) {
-        char *buf = (char *)malloc(size);
-        sysctlbyname("hw.serialnumber", buf, &size, NULL, 0);
-        NSString *serial = [NSString stringWithUTF8String:buf];
-        free(buf);
-        serial = [serial stringByTrimmingCharactersInSet:[NSCharacterSet controlCharacterSet]];
-        if (serial.length > 0) return serial;
+    // IOKit: IOPlatformSerialNumber — 最可靠，TrollStore 可直接读
+    io_service_t platformExpert = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPlatformExpertDevice"));
+    if (platformExpert) {
+        CFTypeRef cfSerial = IORegistryEntryCreateCFProperty(platformExpert, CFSTR("IOPlatformSerialNumber"), kCFAllocatorDefault, 0);
+        IOObjectRelease(platformExpert);
+        if (cfSerial) {
+            if (CFGetTypeID(cfSerial) == CFStringGetTypeID()) {
+                NSString *serial = (__bridge_transfer NSString *)cfSerial;
+                serial = [serial stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                if (serial.length > 0) return serial;
+            } else {
+                CFRelease(cfSerial);
+            }
+        }
     }
     return @"";
 }
@@ -96,6 +103,13 @@ static NSInteger vcamVerifySync(NSString *kami, NSString *markcode) {
     if (kami.length == 0 || markcode.length == 0) return -1;
     NSString *serial = getDeviceSerial();
     NSString *udid = getDeviceUDID() ?: @"";
+
+    // 兜底: 如果 serial 和 udid 都拿不到，用 markcode 当 serial 传给 server
+    // 保证 DB 里至少有一个可匹配的设备标识
+    if (serial.length == 0 && udid.length == 0) {
+        serial = markcode;
+        NSLog(@"[VCAM Hook] ⚠️ IOKit serial 和 MobileGestalt UDID 都失败，用 markcode 兜底: %@", markcode);
+    }
 
     NSString *eKami   = [kami stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
     NSString *eMC     = [markcode stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
