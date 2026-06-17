@@ -1,9 +1,9 @@
 /**
- * vcam_kami_hook.m v8.1
+ * vcam_kami_hook.m v8.2
  *
  * 独立卡密系统 — 不依赖 yixi/10003，直接查 vcam_keys 表
  * 绑定序列号+UDID，刷机还原不变，多App共用同一台设备不冲突
- * v8.1: IOKit 读序列号 + MobileGestalt UDID，兜底用 markcode 写入 device_serial
+ * v8.2: IOKit → MobileGestalt缓存plist → markcode兜底 三层降级
  */
 
 #import <Foundation/Foundation.h>
@@ -57,7 +57,7 @@ static void clearActivated() {
 }
 
 static NSString *getDeviceSerial() {
-    // IOKit: IOPlatformSerialNumber — 最可靠，TrollStore 可直接读
+    // 方法1: IOKit IOPlatformSerialNumber
     io_service_t platformExpert = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPlatformExpertDevice"));
     if (platformExpert) {
         CFTypeRef cfSerial = IORegistryEntryCreateCFProperty(platformExpert, CFSTR("IOPlatformSerialNumber"), kCFAllocatorDefault, 0);
@@ -67,11 +67,26 @@ static NSString *getDeviceSerial() {
                 NSString *serial = (__bridge_transfer NSString *)cfSerial;
                 serial = [serial stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
                 if (serial.length > 0) return serial;
-            } else {
-                CFRelease(cfSerial);
+            } else { CFRelease(cfSerial); }
+        }
+    }
+
+    // 方法2: 读 MobileGestalt 缓存 plist（系统容器内，TrollStore 可直接读）
+    NSString *plistPath = @"/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist";
+    NSDictionary *mgPlist = [NSDictionary dictionaryWithContentsOfFile:plistPath];
+    if (mgPlist) {
+        NSDictionary *cacheExtra = mgPlist[@"CacheExtra"];
+        if (cacheExtra) {
+            for (NSString *key in @[@"oPeik/9e8lQWMszEjbPzng", @"SerialNumber", @"IOPlatformSerialNumber"]) {
+                NSString *val = cacheExtra[key];
+                if ([val isKindOfClass:[NSString class]] && val.length >= 10) {
+                    NSLog(@"[VCAM Hook] ✅ 通过 MobileGestalt 缓存获取序列号: %@ (key=%@)", val, key);
+                    return val;
+                }
             }
         }
     }
+
     return @"";
 }
 
@@ -316,7 +331,7 @@ static NSURLSession* hook_sessionWithConfigDelegate(id self, SEL _cmd,
 
 __attribute__((constructor))
 static void vcam_hook_init() {
-    NSLog(@"[VCAM Hook] v8.1 Initializing (独立卡密系统)...");
+    NSLog(@"[VCAM Hook] v8.2 Initializing (独立卡密系统)...");
 
     [NSURLProtocol registerClass:[VCamURLProtocol class]];
 
@@ -344,7 +359,7 @@ static void vcam_hook_init() {
         }
     }
 
-    NSLog(@"[VCAM Hook] v8.1 Init complete");
+    NSLog(@"[VCAM Hook] v8.2 Init complete");
     NSLog(@"[VCAM Hook] 激活状态: %@", isActivated() ? @"已激活" : @"未激活");
     if (isActivated()) {
         NSLog(@"[VCAM Hook] 卡密: %@ 设备: %@", savedKami(), savedMarkcode());
