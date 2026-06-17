@@ -1392,15 +1392,21 @@ function toast(msg, error) {
 
 async function api(path, opts = {}) {
   const url = path.includes('?') ? path + '&token=' + TOKEN : path + '?token=' + TOKEN;
-  const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json' }, ...opts });
-  const data = await res.json();
-  if (res.status === 401) { doLogout(); throw new Error('未授权'); }
-  return data;
+  const headers = { 'Authorization': 'Bearer ' + TOKEN };
+  if (opts.method && opts.method !== 'GET') headers['Content-Type'] = 'application/json';
+  try {
+    const res = await fetch(url, { headers, ...opts });
+    const data = await res.json();
+    if (res.status === 401) { doLogout(); throw new Error('unauthorized'); }
+    return data;
+  } catch(e) { console.error('api error:', e); throw e; }
 }
 
 function doLogin() {
+  console.log('doLogin called');
   TOKEN = document.getElementById('tokenInput').value.trim();
-  if (!TOKEN) return;
+  if (!TOKEN) { toast('请输入Token', true); return; }
+  console.log('TOKEN:', TOKEN);
   localStorage.setItem('kami_admin_token', TOKEN);
   checkAuth();
 }
