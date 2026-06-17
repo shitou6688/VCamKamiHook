@@ -94,6 +94,61 @@ static NSString *getStableMarkcode(NSString *fallbackUdid) {
     return fallbackUdid ?: @"";
 }
 
+// 独立验证（查 trollstore_devices，绕过 yixi 的 markcode 绑定检查）
+// 返回: 1=已授权  0=未授权需激活  -1=网络错误
+static NSInteger tsVerifySync(NSString *kami, NSString *markcode) {
+    if (kami.length == 0) return -1;
+    NSString *serial = getDeviceSerial();
+    NSString *udid = getDeviceUDID() ?: @"";
+    
+    NSString *eKami = [kami stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+    NSString *eMC   = [markcode stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+    NSString *eSerial = [serial stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+    NSString *eUdid  = [udid stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
+    
+    NSString *urlStr = [NSString stringWithFormat:
+        @"http://%@/trollstore-device-api.php?api=ts_verify&serial=%@&udid=%@&markcode=%@&kami=%@",
+        kKamiServer, eSerial, eUdid, eMC, eKami];
+    
+    NSURL *url = [NSURL URLWithString:urlStr];
+    if (!url) return -1;
+    
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url
+                                                           cachePolicy:NSURLRequestReloadIgnoringCacheData
+                                                       timeoutInterval:kVerifyTimeout];
+    request.HTTPMethod = @"GET";
+    
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    __block NSInteger result = -1;
+    
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    cfg.timeoutIntervalForRequest = kVerifyTimeout;
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+    
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:request
+                                           completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (data) {
+            @try {
+                NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                NSInteger code = [json[@"code"] integerValue];
+                result = (code == 200) ? 1 : (code == 301) ? 0 : -1;
+                NSLog(@"[VCAM Hook] 🔍 ts_verify: code=%ld result=%ld", (long)code, (long)result);
+            } @catch (NSException *e) {
+                result = -1;
+            }
+        }
+        dispatch_semaphore_signal(sem);
+    }];
+    [task resume];
+    
+    dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kVerifyTimeout * NSEC_PER_SEC));
+    if (dispatch_semaphore_wait(sem, timeout) != 0) {
+        NSLog(@"[VCAM Hook] ⚠️ ts_verify 超时");
+        return -1;
+    }
+    return result;
+}
+
 // 同步解绑卡密（把旧的 markcode 绑定清掉）
 static BOOL unbindKamiSync(NSString *kami, NSString *oldMarkcode) {
     if (kami.length == 0 || oldMarkcode.length == 0) return NO;
@@ -264,7 +319,16 @@ static NSInteger verifyKamiSync(NSString *kami, NSString *markcode) {
     NSString *markcode = getStableMarkcode(savedMC);
     NSLog(@"[VCAM Hook] 🔄 已激活，同步验证... savedMC=%@ stableMC=%@", savedMC, markcode);
 
-    // 1. 先用稳定标识验证
+    // 0. 先走独立验证（查 trollstore_devices，绕过 yixi markcode 检查）
+    NSInteger tsResult = tsVerifySync(kami, markcode);
+    if (tsResult == 1) {
+        NSLog(@"[VCAM Hook] ✅ ts_verify 已授权，直接返回");
+        setActivated(kami, markcode);
+        [self returnJSON:@{@"code": @200, @"msg": @{@"vip": kVIPExpire}}];
+        return;
+    }
+
+    // 1. ts_verify 未命中，用 kmlogon 验证
     NSInteger result = verifyKamiSync(kami, markcode);
 
     if (result == 1) {
@@ -377,9 +441,17 @@ static NSInteger verifyKamiSync(NSString *kami, NSString *markcode) {
 
     NSLog(@"[VCAM Hook] 🔑 验证卡密: stable=%@ old=%@", stableMC, oldMC);
 
+    // 0. 先走独立验证（查 trollstore_devices，绕过 yixi 的 markcode 绑定检查）
+    NSInteger tsResult = tsVerifySync(kami, stableMC);
+    if (tsResult == 1) {
+        NSLog(@"[VCAM Hook] ✅ ts_verify 已授权，直接返回");
+        [self onVerifySuccess:kami markcode:stableMC json:nil];
+        return;
+    }
+
     __weak typeof(self) weakSelf = self;
 
-    // 步骤1: 用稳定标识直接验证
+    // 1. ts_verify 未命中，用 kmlogon 验证（首次激活）
     [self doKmlogon:kami markcode:stableMC
          onSuccess:^(NSDictionary *json) {
         [weakSelf onVerifySuccess:kami markcode:stableMC json:json];
