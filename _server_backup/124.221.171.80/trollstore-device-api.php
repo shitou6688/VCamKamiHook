@@ -23,6 +23,9 @@ $mysqli->query("CREATE TABLE IF NOT EXISTS trollstore_pending_kami (
 if (isset($_GET['api'])) {
     $api = $mysqli->real_escape_string($_GET['api']);
     switch ($api) {
+        case 'vcam_verify': vcam_verify($mysqli); break;
+        case 'vcam_admin_add': vcam_admin_add($mysqli); break;
+        case 'vcam_admin_list': vcam_admin_list($mysqli); break;
         case 'ts_verify': ts_verify($mysqli); break;
         case 'ts_register': ts_register($mysqli); break;
         case 'ts_check': ts_check($mysqli); break;
@@ -117,6 +120,128 @@ function ts_verify($mysqli) {
 
     // 未找到 → 需要首次激活（客户端会走 kmlogon + ts_register）
     echo json_encode(['code' => 301, 'msg' => '需要首次激活']);
+}
+
+// ========== 独立卡密系统（不依赖 yixi）==========
+
+function _vcam_init_table($mysqli) {
+    $mysqli->query("CREATE TABLE IF NOT EXISTS vcam_device_kamis (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        kami VARCHAR(255) NOT NULL UNIQUE,
+        device_serial VARCHAR(255) DEFAULT '',
+        device_udid VARCHAR(255) DEFAULT '',
+        device_markcode VARCHAR(255) DEFAULT '',
+        device_model VARCHAR(100) DEFAULT '',
+        ios_version VARCHAR(20) DEFAULT '',
+        activated_at DATETIME DEFAULT NULL,
+        last_active DATETIME DEFAULT NULL,
+        status ENUM('active','disabled') DEFAULT 'active',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_kami (kami),
+        INDEX idx_serial (device_serial),
+        INDEX idx_udid (device_udid)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+}
+
+function vcam_verify($mysqli) {
+    _vcam_init_table($mysqli);
+
+    $kami = isset($_GET['kami']) ? $mysqli->real_escape_string($_GET['kami']) : '';
+    $serial = isset($_GET['serial']) ? $mysqli->real_escape_string($_GET['serial']) : '';
+    $udid = isset($_GET['udid']) ? $mysqli->real_escape_string($_GET['udid']) : '';
+    $markcode = isset($_GET['markcode']) ? $mysqli->real_escape_string($_GET['markcode']) : '';
+    $model = isset($_GET['model']) ? $mysqli->real_escape_string($_GET['model']) : '';
+    $ios = isset($_GET['ios']) ? $mysqli->real_escape_string($_GET['ios']) : '';
+
+    if (empty($kami)) {
+        echo json_encode(['code' => 400, 'msg' => '缺少卡密']);
+        return;
+    }
+
+    $res = $mysqli->query("SELECT * FROM vcam_device_kamis WHERE kami = '$kami' LIMIT 1");
+    if (!$res || $res->num_rows == 0) {
+        echo json_encode(['code' => 401, 'msg' => '卡密不存在']);
+        return;
+    }
+    $row = $res->fetch_assoc();
+
+    if ($row['status'] === 'disabled') {
+        echo json_encode(['code' => 401, 'msg' => '卡密已禁用']);
+        return;
+    }
+
+    // 已绑定设备 → 校验是否为同一设备
+    if (!empty($row['device_serial']) || !empty($row['device_udid'])) {
+        $same = false;
+        if (!empty($serial) && $serial === $row['device_serial']) $same = true;
+        if (!$same && !empty($udid) && $udid === $row['device_udid']) $same = true;
+
+        if ($same) {
+            $mysqli->query("UPDATE vcam_device_kamis SET last_active = NOW(), device_markcode = '$markcode' WHERE id = {$row['id']}");
+            echo json_encode(['code' => 200, 'msg' => '授权成功']);
+        } else {
+            echo json_encode(['code' => 401, 'msg' => '卡密已被其他设备使用']);
+        }
+        return;
+    }
+
+    // 首次激活 → 绑定设备
+    $mysqli->query("UPDATE vcam_device_kamis SET
+        device_serial = '$serial',
+        device_udid = '$udid',
+        device_markcode = '$markcode',
+        device_model = '$model',
+        ios_version = '$ios',
+        activated_at = NOW(),
+        last_active = NOW()
+        WHERE id = {$row['id']}");
+
+    echo json_encode(['code' => 200, 'msg' => '激活成功']);
+}
+
+function vcam_admin_add($mysqli) {
+    global $ADMIN_KEY;
+    if (!isset($_GET['key']) || $_GET['key'] !== $ADMIN_KEY) {
+        echo json_encode(['code' => 403]);
+        return;
+    }
+    _vcam_init_table($mysqli);
+
+    $kami = isset($_GET['kami']) ? $mysqli->real_escape_string($_GET['kami']) : '';
+    $count = isset($_GET['count']) ? intval($_GET['count']) : 0;
+
+    if (!empty($kami)) {
+        $mysqli->query("INSERT IGNORE INTO vcam_device_kamis (kami) VALUES ('$kami')");
+        echo json_encode(['code' => 200, 'msg' => '添加成功', 'kami' => $kami]);
+        return;
+    }
+
+    if ($count > 0 && $count <= 100) {
+        $added = [];
+        for ($i = 0; $i < $count; $i++) {
+            $k = strtoupper(substr(md5(uniqid(mt_rand(), true)), 0, 16));
+            $mysqli->query("INSERT IGNORE INTO vcam_device_kamis (kami) VALUES ('$k')");
+            $added[] = $k;
+        }
+        echo json_encode(['code' => 200, 'msg' => "已生成 $count 张卡密", 'kamis' => $added]);
+        return;
+    }
+
+    echo json_encode(['code' => 400, 'msg' => '请提供 kami 或 count(1-100)']);
+}
+
+function vcam_admin_list($mysqli) {
+    global $ADMIN_KEY;
+    if (!isset($_GET['key']) || $_GET['key'] !== $ADMIN_KEY) {
+        echo json_encode(['code' => 403]);
+        return;
+    }
+    _vcam_init_table($mysqli);
+
+    $res = $mysqli->query("SELECT * FROM vcam_device_kamis ORDER BY created_at DESC LIMIT 200");
+    $rows = [];
+    while ($row = $res->fetch_assoc()) $rows[] = $row;
+    echo json_encode(['code' => 200, 'data' => $rows]);
 }
 
 function ts_admin_config($mysqli) {
