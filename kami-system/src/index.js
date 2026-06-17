@@ -1249,6 +1249,7 @@ tr:hover td { background: #1e293b; }
     <a href="#" onclick="showTab('blacklist')">黑名单</a>
     <a href="#" onclick="showTab('apps')">应用</a>
     <a href="#" onclick="showTab('logs')">日志</a>
+    <a href="#" onclick="showTab('vcam')">🎥 VCam</a>
     <div class="spacer"></div>
     <span class="logout" onclick="doLogout()">退出</span>
   </div>
@@ -1354,6 +1355,24 @@ tr:hover td { background: #1e293b; }
       </div>
       <div class="pagination" id="logsPagination"></div>
     </div>
+
+    <!-- VCam 独立卡密 -->
+    <div id="tab-vcam" class="tab-content">
+      <div class="stats" id="vcamStats"></div>
+      <div class="panel">
+        <h2>🎥 VCam 卡密管理</h2>
+        <div class="form-row" style="margin-bottom:14px;">
+          <div class="form-group"><label>数量</label><input id="vcamCount" type="number" value="1" min="1" max="100" style="width:80px;"></div>
+          <button class="btn btn-primary" onclick="vcamGenerate()">⚡ 批量生成</button>
+          <button class="btn" style="background:#22c55e;color:white" onclick="vcamAddOne()">+ 添加单张</button>
+        </div>
+        <div class="copy-area" id="vcamResult" style="display:none"></div>
+        <table style="margin-top:14px;">
+          <thead><tr><th>ID</th><th>卡密</th><th>状态</th><th>绑定</th><th>序列号</th><th>型号</th><th>激活时间</th><th>操作</th></tr></thead>
+          <tbody id="vcamBody"></tbody>
+        </table>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1404,7 +1423,7 @@ async function checkAuth() {
   } catch { doLogout(); }
 }
 
-const tabNames = ['dashboard','keys','generate','blacklist','apps','logs'];
+const tabNames = ['dashboard','keys','generate','blacklist','apps','logs','vcam'];
 function showTab(name) {
   document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
   document.getElementById('tab-' + name).classList.add('active');
@@ -1414,6 +1433,7 @@ function showTab(name) {
   if (name === 'dashboard') loadStats();
   if (name === 'blacklist') loadBlacklist();
   if (name === 'apps') loadApps();
+  if (name === 'vcam') loadVcam();
   return false;
 }
 
@@ -1627,6 +1647,71 @@ function renderPagination(containerId, current, total, onClick) {
 }
 
 if (TOKEN) checkAuth();
+
+// ===== VCam =====
+async function loadVcam() {
+  const data = await api('/trollstore-device-api.php?api=vcam_admin_stats');
+  if (data.code === 200) {
+    document.getElementById('vcamStats').innerHTML = [
+      { label: '总卡密', value: data.total, cls: '' },
+      { label: '可用', value: data.active, cls: 'unused' },
+      { label: '已激活', value: data.bound, cls: 'used' },
+      { label: '已禁用', value: data.disabled, cls: 'revoked' },
+    ].map(i => '<div class="stat-card ' + i.cls + '"><div class="label">' + i.label + '</div><div class="value">' + i.value + '</div></div>').join('');
+  }
+  const list = await api('/trollstore-device-api.php?api=vcam_admin_list');
+  if (list.code === 200) {
+    const rows = list.data || [];
+    document.getElementById('vcamBody').innerHTML = rows.length === 0
+      ? '<tr><td colspan="8" style="text-align:center;color:#94a3b8;padding:20px;">暂无卡密</td></tr>'
+      : rows.map(r => {
+        const bound = r.activated_at ? 'used' : 'unused';
+        const statusClass = r.status === 'active' ? 'badge-unused' : 'badge-revoked';
+        return '<tr><td>' + r.id + '</td><td class="key-code">' + (r.code||'') + '</td><td><span class="badge ' + statusClass + '">' + (r.status==='active'?'可用':'禁用') + '</span></td><td><span class="badge badge-' + (bound==='used'?'used':'expired') + '">' + (bound==='used'?'已激活':'未激活') + '</span></td><td style="font-size:10px;">' + (r.device_serial||'-') + '</td><td>' + (r.device_model||'-') + '</td><td style="font-size:10px;">' + (r.activated_at||'-') + '</td><td><button class="btn btn-sm btn-danger" onclick="vcamToggle(' + r.id + ')">' + (r.status==='active'?'禁用':'启用') + '</button> ' + (r.activated_at ? '<button class="btn btn-sm" style="background:#f59e0b;color:white" onclick="vcamUnbind(' + r.id + ')">解绑</button> ' : '') + '<button class="btn btn-sm" style="background:#64748b;color:white" onclick="vcamDelete(' + r.id + ')">删</button></td></tr>';
+      }).join('');
+  }
+}
+
+async function vcamGenerate() {
+  const cnt = parseInt(document.getElementById('vcamCount').value) || 1;
+  const data = await api('/trollstore-device-api.php?api=vcam_admin_add&count=' + cnt);
+  if (data.code === 200 && data.kamis) {
+    document.getElementById('vcamResult').style.display = 'block';
+    document.getElementById('vcamResult').textContent = data.kamis.join('\n');
+    toast('已生成 ' + data.kamis.length + ' 张卡密');
+    loadVcam();
+  } else { toast(data.msg || '生成失败', true); }
+}
+
+async function vcamAddOne() {
+  const data = await api('/trollstore-device-api.php?api=vcam_admin_add&count=1');
+  if (data.code === 200 && data.kamis) {
+    document.getElementById('vcamResult').style.display = 'block';
+    document.getElementById('vcamResult').textContent = data.kamis[0];
+    toast('卡密已生成');
+    loadVcam();
+  }
+}
+
+async function vcamToggle(id) {
+  const data = await api('/trollstore-device-api.php?api=vcam_admin_toggle&id=' + id);
+  toast(data.msg);
+  loadVcam();
+}
+
+async function vcamUnbind(id) {
+  if (!confirm('确定解绑该卡密？')) return;
+  const data = await api('/trollstore-device-api.php?api=vcam_admin_unbind&id=' + id);
+  toast(data.msg);
+  loadVcam();
+}
+
+async function vcamDelete(id) {
+  if (!confirm('确定删除？不可恢复！')) return;
+  const data = await api('/trollstore-device-api.php?api=vcam_admin_delete&id=' + id);
+  toast(data.msg);
+  loadVcam();
+}
 document.getElementById('tokenInput').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
 </script>
 </body>
