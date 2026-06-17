@@ -13,7 +13,7 @@
 
 // ============ 配置 ============
 
-static NSString *const kKamiServer    = @"124.221.171.80";
+static NSString *const kKamiServer    = @"kami.jumo8.top";
 static NSString *const kVIPExpire     = @"4102243200";
 
 static NSString *const kKeyActivated  = @"vcam_kami_activated";
