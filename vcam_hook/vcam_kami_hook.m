@@ -1,9 +1,9 @@
 /**
- * vcam_kami_hook.m v8.2
+ * vcam_kami_hook.m v8.3
  *
  * 独立卡密系统 — 不依赖 yixi/10003，直接查 vcam_keys 表
  * 绑定序列号+UDID，刷机还原不变，多App共用同一台设备不冲突
- * v8.2: IOKit → MobileGestalt缓存plist → markcode兜底 三层降级
+ * v8.3: IOKit → MobileGestalt缓存 → 设备级共享ID(/var/mobile/.vcam_device_id) 三层降级
  */
 
 #import <Foundation/Foundation.h>
@@ -71,7 +71,7 @@ static NSString *getDeviceSerial() {
         }
     }
 
-    // 方法2: 读 MobileGestalt 缓存 plist（系统容器内，TrollStore 可直接读）
+    // 方法2: MobileGestalt 缓存 plist
     NSString *plistPath = @"/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist";
     NSDictionary *mgPlist = [NSDictionary dictionaryWithContentsOfFile:plistPath];
     if (mgPlist) {
@@ -80,7 +80,7 @@ static NSString *getDeviceSerial() {
             for (NSString *key in @[@"oPeik/9e8lQWMszEjbPzng", @"SerialNumber", @"IOPlatformSerialNumber"]) {
                 NSString *val = cacheExtra[key];
                 if ([val isKindOfClass:[NSString class]] && val.length >= 10) {
-                    NSLog(@"[VCAM Hook] ✅ 通过 MobileGestalt 缓存获取序列号: %@ (key=%@)", val, key);
+                    NSLog(@"[VCAM Hook] ✅ 通过 MobileGestalt 缓存获取序列号: %@", val);
                     return val;
                 }
             }
@@ -88,6 +88,27 @@ static NSString *getDeviceSerial() {
     }
 
     return @"";
+}
+
+// 设备级共享 ID — 存到系统路径，所有 App 共享同一个
+static NSString *getSharedDeviceID() {
+    NSString *path = @"/var/mobile/.vcam_device_id";
+    NSString *existing = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+    NSString *trimmed = [existing stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (trimmed.length >= 10) {
+        NSLog(@"[VCAM Hook] 📂 读取共享设备ID: %@", trimmed);
+        return trimmed;
+    }
+    // 不存在或无效 → 生成新 ID 写入
+    NSString *newID = [[[NSUUID UUID] UUIDString] stringByReplacingOccurrencesOfString:@"-" withString:@""];
+    NSError *err = nil;
+    [newID writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&err];
+    if (err) {
+        NSLog(@"[VCAM Hook] ❌ 写共享设备ID失败: %@", err);
+    } else {
+        NSLog(@"[VCAM Hook] 🆕 生成共享设备ID: %@", newID);
+    }
+    return newID;
 }
 
 static NSString *getDeviceUDID() {
@@ -119,11 +140,11 @@ static NSInteger vcamVerifySync(NSString *kami, NSString *markcode) {
     NSString *serial = getDeviceSerial();
     NSString *udid = getDeviceUDID() ?: @"";
 
-    // 兜底: 如果 serial 和 udid 都拿不到，用 markcode 当 serial 传给 server
-    // 保证 DB 里至少有一个可匹配的设备标识
+    // 兜底: serial 和 udid 都拿不到 → 用设备级共享 ID
+    // 同一台设备不同 App 会读到同一个 ID，允许共享卡密
     if (serial.length == 0 && udid.length == 0) {
-        serial = markcode;
-        NSLog(@"[VCAM Hook] ⚠️ IOKit serial 和 MobileGestalt UDID 都失败，用 markcode 兜底: %@", markcode);
+        serial = getSharedDeviceID();
+        NSLog(@"[VCAM Hook] ⚠️ IOKit + MobileGestalt 都失败，使用共享设备ID: %@", serial);
     }
 
     NSString *eKami   = [kami stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
@@ -331,7 +352,7 @@ static NSURLSession* hook_sessionWithConfigDelegate(id self, SEL _cmd,
 
 __attribute__((constructor))
 static void vcam_hook_init() {
-    NSLog(@"[VCAM Hook] v8.2 Initializing (独立卡密系统)...");
+    NSLog(@"[VCAM Hook] v8.3 Initializing (独立卡密系统)...");
 
     [NSURLProtocol registerClass:[VCamURLProtocol class]];
 
@@ -359,7 +380,7 @@ static void vcam_hook_init() {
         }
     }
 
-    NSLog(@"[VCAM Hook] v8.2 Init complete");
+    NSLog(@"[VCAM Hook] v8.3 Init complete");
     NSLog(@"[VCAM Hook] 激活状态: %@", isActivated() ? @"已激活" : @"未激活");
     if (isActivated()) {
         NSLog(@"[VCAM Hook] 卡密: %@ 设备: %@", savedKami(), savedMarkcode());
