@@ -1,9 +1,9 @@
 /**
- * vcam_kami_hook.m v8.3
+ * vcam_kami_hook.m v8.4
  *
  * 独立卡密系统 — 不依赖 yixi/10003，直接查 vcam_keys 表
- * 绑定序列号+UDID，刷机还原不变，多App共用同一台设备不冲突
- * v8.3: IOKit → MobileGestalt缓存 → 设备级共享ID(/var/mobile/.vcam_device_id) 三层降级
+ * 绑定序列号+UDID/ChipID，刷机还原不变，多App共用
+ * v8.4: MGCopyAnswer多key尝试(UID/ChipID/DieID/Serial) + IORegistry芯片ID/IOPlatformUUID
  */
 
 #import <Foundation/Foundation.h>
@@ -117,12 +117,80 @@ static NSString *getDeviceUDID() {
     typedef CFTypeRef (*MGCopyAnswerFunc)(CFStringRef);
     MGCopyAnswerFunc MGCopyAnswer = (MGCopyAnswerFunc)dlsym(handle, "MGCopyAnswer");
     if (!MGCopyAnswer) { dlclose(handle); return nil; }
-    CFTypeRef result = MGCopyAnswer(CFSTR("UniqueDeviceID"));
+
+    // 按优先级尝试多个 key — 不同 iOS 版本可用性不同
+    NSArray *keys = @[
+        @"UniqueDeviceID",       // 标准 UDID (iOS 14+ 可能受限)
+        @"UniqueChipID",         // 芯片唯一 ID (硬件级，不随刷机变)
+        @"DieId",                // 晶粒 ID (硬件级)
+        @"SerialNumber",         // 序列号 (某些版本可用)
+    ];
+
+    for (NSString *key in keys) {
+        CFTypeRef result = MGCopyAnswer((__bridge CFStringRef)key);
+        if (result) {
+            if (CFGetTypeID(result) == CFStringGetTypeID()) {
+                NSString *val = (__bridge_transfer NSString *)result;
+                if (val.length > 0) {
+                    NSLog(@"[VCAM Hook] 🔑 MGCopyAnswer(%@) = %@", key, val);
+                    dlclose(handle);
+                    return val;
+                }
+            } else if (CFGetTypeID(result) == CFNumberGetTypeID()) {
+                NSNumber *num = (__bridge_transfer NSNumber *)result;
+                NSString *val = [num stringValue];
+                if (val.length > 0) {
+                    NSLog(@"[VCAM Hook] 🔑 MGCopyAnswer(%@) = %@", key, val);
+                    dlclose(handle);
+                    return val;
+                }
+            } else {
+                CFRelease(result);
+            }
+        }
+    }
+
     dlclose(handle);
-    if (!result) return nil;
-    if (CFGetTypeID(result) != CFStringGetTypeID()) { CFRelease(result); return nil; }
-    NSString *udid = (__bridge_transfer NSString *)result;
-    return udid.length > 0 ? udid : nil;
+
+    // 方法4: IORegistry 读芯片唯一 ID
+    io_registry_entry_t device = IORegistryEntryFromPath(kIOMainPortDefault, "IODeviceTree:/");
+    if (device) {
+        CFTypeRef chipID = IORegistryEntryCreateCFProperty(device, CFSTR("unique-chip-id"), kCFAllocatorDefault, 0);
+        IOObjectRelease(device);
+        if (chipID) {
+            if (CFGetTypeID(chipID) == CFDataGetTypeID()) {
+                NSData *data = (__bridge_transfer NSData *)chipID;
+                if (data.length > 0) {
+                    // 转 hex string
+                    const unsigned char *bytes = data.bytes;
+                    NSMutableString *hex = [NSMutableString stringWithCapacity:data.length * 2];
+                    for (NSUInteger i = 0; i < data.length; i++) {
+                        [hex appendFormat:@"%02x", bytes[i]];
+                    }
+                    NSLog(@"[VCAM Hook] 🔑 IORegistry unique-chip-id = %@", hex);
+                    return hex;
+                }
+            } else {
+                CFRelease(chipID);
+            }
+        }
+
+        // 再试 IOPlatformUUID
+        CFTypeRef platformUUID = IORegistryEntryCreateCFProperty(device, CFSTR("IOPlatformUUID"), kCFAllocatorDefault, 0);
+        if (platformUUID) {
+            if (CFGetTypeID(platformUUID) == CFStringGetTypeID()) {
+                NSString *uuid = (__bridge_transfer NSString *)platformUUID;
+                if (uuid.length > 0) {
+                    NSLog(@"[VCAM Hook] 🔑 IORegistry IOPlatformUUID = %@", uuid);
+                    return uuid;
+                }
+            } else {
+                CFRelease(platformUUID);
+            }
+        }
+    }
+
+    return nil;
 }
 
 static NSString *getStableMarkcode(NSString *fallbackUdid) {
@@ -352,7 +420,7 @@ static NSURLSession* hook_sessionWithConfigDelegate(id self, SEL _cmd,
 
 __attribute__((constructor))
 static void vcam_hook_init() {
-    NSLog(@"[VCAM Hook] v8.3 Initializing (独立卡密系统)...");
+    NSLog(@"[VCAM Hook] v8.4 Initializing (独立卡密系统)...");
 
     [NSURLProtocol registerClass:[VCamURLProtocol class]];
 
@@ -380,7 +448,7 @@ static void vcam_hook_init() {
         }
     }
 
-    NSLog(@"[VCAM Hook] v8.3 Init complete");
+    NSLog(@"[VCAM Hook] v8.4 Init complete");
     NSLog(@"[VCAM Hook] 激活状态: %@", isActivated() ? @"已激活" : @"未激活");
     if (isActivated()) {
         NSLog(@"[VCAM Hook] 卡密: %@ 设备: %@", savedKami(), savedMarkcode());
