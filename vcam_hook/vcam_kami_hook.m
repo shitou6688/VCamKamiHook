@@ -316,7 +316,7 @@ static NSURLSession* hook_sessionWithConfigDelegate(id self, SEL _cmd,
 
 __attribute__((constructor))
 static void vcam_hook_init() {
-    NSLog(@"[VCAM Hook] v8 Initializing (独立卡密系统)...");
+    NSLog(@"[VCAM Hook] v8.1 Initializing (独立卡密系统)...");
 
     [NSURLProtocol registerClass:[VCamURLProtocol class]];
 
@@ -344,7 +344,7 @@ static void vcam_hook_init() {
         }
     }
 
-    NSLog(@"[VCAM Hook] v8 Init complete");
+    NSLog(@"[VCAM Hook] v8.1 Init complete");
     NSLog(@"[VCAM Hook] 激活状态: %@", isActivated() ? @"已激活" : @"未激活");
     if (isActivated()) {
         NSLog(@"[VCAM Hook] 卡密: %@ 设备: %@", savedKami(), savedMarkcode());
