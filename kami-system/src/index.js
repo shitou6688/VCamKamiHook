@@ -331,6 +331,8 @@ async function initVcamTable(DB) {
       device_markcode TEXT DEFAULT '',
       device_model TEXT DEFAULT '',
       ios_version TEXT DEFAULT '',
+      activated_count INTEGER DEFAULT 0,
+      max_activations INTEGER DEFAULT 1,
       activated_at TEXT DEFAULT NULL,
       last_active TEXT DEFAULT NULL,
       expires_at TEXT DEFAULT NULL,
@@ -343,6 +345,8 @@ async function initVcamTable(DB) {
   // Migration: add columns to existing tables (idempotent via try/catch)
   try { await DB.prepare('ALTER TABLE vcam_keys ADD COLUMN expires_at TEXT DEFAULT NULL').run(); } catch {}
   try { await DB.prepare("ALTER TABLE vcam_keys ADD COLUMN duration_type TEXT DEFAULT 'permanent'").run(); } catch {}
+  try { await DB.prepare('ALTER TABLE vcam_keys ADD COLUMN activated_count INTEGER DEFAULT 0').run(); } catch {}
+  try { await DB.prepare('ALTER TABLE vcam_keys ADD COLUMN max_activations INTEGER DEFAULT 1').run(); } catch {}
 }
 
 async function handleVcamVerify(request, env) {
@@ -376,31 +380,44 @@ async function handleVcamVerify(request, env) {
     }
   }
 
-  // 已绑定设备 → 校验是否为同一设备
-  if (keyRow.device_serial || keyRow.device_udid) {
-    let sameDevice = false;
-    if (serial && keyRow.device_serial === serial) sameDevice = true;
-    if (!sameDevice && udid && keyRow.device_udid === udid) sameDevice = true;
+  // 已绑定设备 — device_serial 存逗号分隔的设备ID列表
+  const existingSerials = (keyRow.device_serial || '').split(',').filter(s => s.length > 0);
+  const existingUdids = (keyRow.device_udid || '').split(',').filter(s => s.length > 0);
 
-    if (sameDevice) {
-      await env.DB.prepare(
-        'UPDATE vcam_keys SET last_active = datetime(now), device_markcode = ? WHERE id = ?'
-      ).bind(markcode, keyRow.id).run();
-      return json({ code: 200, msg: '授权成功', expires_at: keyRow.expires_at, duration: keyRow.duration_type });
-    }
-    return json({ code: 401, msg: '卡密已被其他设备使用' });
+  // 检查是否已有设备匹配
+  let isSameDevice = false;
+  if (serial && existingSerials.includes(serial)) isSameDevice = true;
+  if (!isSameDevice && udid && existingUdids.includes(udid)) isSameDevice = true;
+
+  if (isSameDevice) {
+    // 同一设备 — 更新最后活跃时间
+    await env.DB.prepare(
+      "UPDATE vcam_keys SET last_active = datetime('now'), device_markcode = ? WHERE id = ?"
+    ).bind(markcode, keyRow.id).run();
+    return json({ code: 200, msg: '授权成功（已绑定设备）', activations: existingSerials.length, max: keyRow.max_activations });
   }
 
-  // 首次激活 → 绑定设备
+  // 新设备 — 检查激活次数是否达上限
+  const maxAct = keyRow.max_activations || 1;
+  if (existingSerials.length >= maxAct) {
+    return json({ code: 401, msg: `卡密已激活 ${existingSerials.length}/${maxAct} 次，已达上限` });
+  }
+
+  // 添加新设备到列表
+  const newSerials = [...existingSerials, serial].filter(s => s.length > 0);
+  const newUdids = [...existingUdids, udid].filter(s => s.length > 0);
+
   await env.DB.prepare(`
     UPDATE vcam_keys SET
       device_serial = ?, device_udid = ?, device_markcode = ?,
       device_model = ?, ios_version = ?,
-      activated_at = datetime('now'), last_active = datetime('now')
+      activated_count = activated_count + 1,
+      activated_at = COALESCE(activated_at, datetime('now')),
+      last_active = datetime('now')
     WHERE id = ?
-  `).bind(serial, udid, markcode, model, ios, keyRow.id).run();
+  `).bind(newSerials.join(','), newUdids.join(','), markcode, model, ios, keyRow.id).run();
 
-  return json({ code: 200, msg: '激活成功', expires_at: keyRow.expires_at, duration: keyRow.duration_type });
+  return json({ code: 200, msg: '激活成功（新设备）', activations: newSerials.length, max: maxAct });
 }
 
 async function handleVcamAdminList(request, env) {
@@ -417,6 +434,7 @@ async function handleVcamAdminAdd(request, env) {
   const kami = url.searchParams.get('kami') || '';
   const count = parseInt(url.searchParams.get('count') || '0') || 0;
   const duration = url.searchParams.get('duration') || 'permanent';
+  const maxAct = parseInt(url.searchParams.get('max') || '1') || 1;
 
   const durationMap = {
     hour: "datetime('now', '+1 hour')",
@@ -429,8 +447,8 @@ async function handleVcamAdminAdd(request, env) {
 
   if (kami) {
     await env.DB.prepare(
-      `INSERT OR IGNORE INTO vcam_keys (code, expires_at, duration_type) VALUES (?, ${expiresExpr}, ?)`
-    ).bind(kami, duration).run();
+      `INSERT OR IGNORE INTO vcam_keys (code, expires_at, duration_type, max_activations) VALUES (?, ${expiresExpr}, ?, ?)`
+    ).bind(kami, duration, maxAct).run();
     return json({ code: 200, msg: '添加成功', kami });
   }
 
@@ -441,8 +459,8 @@ async function handleVcamAdminAdd(request, env) {
       crypto.getRandomValues(arr);
       const k = Array.from(arr, b => b.toString(16).padStart(2, '0')).join('').toUpperCase();
       await env.DB.prepare(
-        `INSERT OR IGNORE INTO vcam_keys (code, expires_at, duration_type) VALUES (?, ${expiresExpr}, ?)`
-      ).bind(k, duration).run();
+        `INSERT OR IGNORE INTO vcam_keys (code, expires_at, duration_type, max_activations) VALUES (?, ${expiresExpr}, ?, ?)`
+      ).bind(k, duration, maxAct).run();
       added.push(k);
     }
     return json({ code: 200, msg: `已生成 ${count} 张`, kamis: added });
@@ -1397,12 +1415,21 @@ tr:hover td { background: #1e293b; }
         <h2>🎥 VCam 卡密管理</h2>
         <div class="form-row" style="margin-bottom:14px;gap:10px;flex-wrap:wrap;">
           <div class="form-group"><label>时长</label>
-            <select id="vcamDuration" style="width:110px;padding:8px;background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:6px;">
+            <select id="vcamDuration" style="width:100px;padding:8px;background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:6px;">
               <option value="hour">🕐 时卡</option>
               <option value="day">📅 天卡</option>
               <option value="week">📆 周卡</option>
               <option value="month">🗓 月卡</option>
               <option value="permanent" selected>♾️ 永久</option>
+            </select>
+          </div>
+          <div class="form-group"><label>激活次数</label>
+            <select id="vcamMaxAct" style="width:80px;padding:8px;background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:6px;">
+              <option value="1">1次</option>
+              <option value="3" selected>3次</option>
+              <option value="5">5次</option>
+              <option value="10">10次</option>
+              <option value="99">无限</option>
             </select>
           </div>
           <div class="form-group"><label>数量</label><input id="vcamCount" type="number" value="1" min="1" max="100" style="width:80px;"></div>
@@ -1411,7 +1438,7 @@ tr:hover td { background: #1e293b; }
         </div>
         <div class="copy-area" id="vcamResult" style="display:none"></div>
         <table style="margin-top:14px;">
-          <thead><tr><th>ID</th><th>卡密</th><th>时长</th><th>到期</th><th>状态</th><th>绑定</th><th>序列号</th><th>激活时间</th><th>操作</th></tr></thead>
+          <thead><tr><th>ID</th><th>卡密</th><th>时长</th><th>到期</th><th>激活</th><th>状态</th><th>设备列表</th><th>操作</th></tr></thead>
           <tbody id="vcamBody"></tbody>
         </table>
       </div>
@@ -1713,11 +1740,12 @@ async function loadVcam() {
     const rows = list.data || [];
     const durLabels = { hour: '时卡', day: '天卡', week: '周卡', month: '月卡', permanent: '永久' };
     document.getElementById('vcamBody').innerHTML = rows.length === 0
-      ? '<tr><td colspan="9" style="text-align:center;color:#94a3b8;padding:20px;">暂无卡密</td></tr>'
+      ? '<tr><td colspan="8" style="text-align:center;color:#94a3b8;padding:20px;">暂无卡密</td></tr>'
       : rows.map(r => {
-        const bound = r.activated_at ? 'used' : 'unused';
+        const actInfo = (r.activated_count||0) + '/' + (r.max_activations||1);
         const statusClass = r.status === 'active' ? 'badge-unused' : 'badge-revoked';
-        return '<tr><td>' + r.id + '</td><td class="key-code">' + (r.code||'') + '</td><td>' + (durLabels[r.duration_type]||'永久') + '</td><td style="font-size:10px;">' + (r.expires_at||'∞') + '</td><td><span class="badge ' + statusClass + '">' + (r.status==='active'?'可用':'禁用') + '</span></td><td><span class="badge badge-' + (bound==='used'?'used':'expired') + '">' + (bound==='used'?'已激活':'未激活') + '</span></td><td style="font-size:10px;">' + (r.device_serial||'-') + '</td><td style="font-size:10px;">' + (r.activated_at||'-') + '</td><td><button class="btn btn-sm btn-danger" onclick="vcamToggle(' + r.id + ')">' + (r.status==='active'?'禁用':'启用') + '</button> ' + (r.activated_at ? '<button class="btn btn-sm" style="background:#f59e0b;color:white" onclick="vcamUnbind(' + r.id + ')">解绑</button> ' : '') + '<button class="btn btn-sm" style="background:#64748b;color:white" onclick="vcamDelete(' + r.id + ')">删</button></td></tr>';
+        const serials = (r.device_serial || '-').split(',').map(s => '<div style="font-size:10px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + s + '">' + s.substring(0,20) + '</div>').join('');
+        return '<tr><td>' + r.id + '</td><td class="key-code">' + (r.code||'') + '</td><td>' + (durLabels[r.duration_type]||'永久') + '</td><td style="font-size:10px;">' + (r.expires_at||'∞') + '</td><td>' + actInfo + '</td><td><span class="badge ' + statusClass + '">' + (r.status==='active'?'可用':'禁用') + '</span></td><td>' + serials + '</td><td><button class="btn btn-sm btn-danger" onclick="vcamToggle(' + r.id + ')">' + (r.status==='active'?'禁用':'启用') + '</button> ' + (r.activated_count > 0 ? '<button class="btn btn-sm" style="background:#f59e0b;color:white" onclick="vcamUnbind(' + r.id + ')">解绑</button> ' : '') + '<button class="btn btn-sm" style="background:#64748b;color:white" onclick="vcamDelete(' + r.id + ')">删</button></td></tr>';
       }).join('');
   }
 }
@@ -1725,18 +1753,20 @@ async function loadVcam() {
 async function vcamGenerate() {
   const cnt = parseInt(document.getElementById('vcamCount').value) || 1;
   const dur = document.getElementById('vcamDuration').value;
-  const data = await api('/trollstore-device-api.php?api=vcam_admin_add&count=' + cnt + '&duration=' + dur);
+  const max = document.getElementById('vcamMaxAct').value;
+  const data = await api('/trollstore-device-api.php?api=vcam_admin_add&count=' + cnt + '&duration=' + dur + '&max=' + max);
   if (data.code === 200 && data.kamis) {
     document.getElementById('vcamResult').style.display = 'block';
     document.getElementById('vcamResult').textContent = data.kamis.join('\\n');
-    toast('已生成 ' + data.kamis.length + ' 张卡密');
+    toast('已生成 ' + data.kamis.length + ' 张(' + max + '次/张)');
     loadVcam();
   } else { toast(data.msg || '生成失败', true); }
 }
 
 async function vcamAddOne() {
   const dur = document.getElementById('vcamDuration').value;
-  const data = await api('/trollstore-device-api.php?api=vcam_admin_add&count=1&duration=' + dur);
+  const max = document.getElementById('vcamMaxAct').value;
+  const data = await api('/trollstore-device-api.php?api=vcam_admin_add&count=1&duration=' + dur + '&max=' + max);
   if (data.code === 200 && data.kamis) {
     document.getElementById('vcamResult').style.display = 'block';
     document.getElementById('vcamResult').textContent = data.kamis[0];

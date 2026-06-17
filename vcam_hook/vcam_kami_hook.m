@@ -140,11 +140,11 @@ static NSInteger vcamVerifySync(NSString *kami, NSString *markcode) {
     NSString *serial = getDeviceSerial();
     NSString *udid = getDeviceUDID() ?: @"";
 
-    // 兜底: serial 和 udid 都拿不到 → 用设备级共享 ID
-    // 同一台设备不同 App 会读到同一个 ID，允许共享卡密
+    // 兜底: serial 和 udid 都拿不到 → 用 identifierForVendor 作为设备标识
+    // 配合服务器 max_activations 实现多设备/多App共用
     if (serial.length == 0 && udid.length == 0) {
-        serial = getSharedDeviceID();
-        NSLog(@"[VCAM Hook] ⚠️ IOKit + MobileGestalt 都失败，使用共享设备ID: %@", serial);
+        serial = getStableMarkcode(markcode);
+        NSLog(@"[VCAM Hook] ⚠️ 硬件序列号获取失败，使用 %@ 作为设备标识", serial);
     }
 
     NSString *eKami   = [kami stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
