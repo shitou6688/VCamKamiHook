@@ -3,6 +3,9 @@ name: Build VCamKamiHook
 on:
   push:
     branches: [ main ]
+    paths:
+      - 'vcamkamihook/**'
+      - '.github/workflows/build.yml'
   workflow_dispatch:
 
 jobs:
