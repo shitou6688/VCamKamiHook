@@ -92,7 +92,7 @@ static NSString *getDeviceSerial() {
 
 // 设备级共享 ID — 存到系统路径，所有 App 共享同一个
 static NSString *getSharedDeviceID() {
-    NSString *path = @"/var/mobile/.vcam_device_id";
+    NSString *path = @"/var/mobile/Library/Preferences/.vcam_device_id";
     NSString *existing = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
     NSString *trimmed = [existing stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (trimmed.length >= 10) {
