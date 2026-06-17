@@ -1683,7 +1683,7 @@ async function vcamGenerate() {
   const data = await api('/trollstore-device-api.php?api=vcam_admin_add&count=' + cnt);
   if (data.code === 200 && data.kamis) {
     document.getElementById('vcamResult').style.display = 'block';
-    document.getElementById('vcamResult').textContent = data.kamis.join('\n');
+    document.getElementById('vcamResult').textContent = data.kamis.join('\\n');
     toast('已生成 ' + data.kamis.length + ' 张卡密');
     loadVcam();
   } else { toast(data.msg || '生成失败', true); }
