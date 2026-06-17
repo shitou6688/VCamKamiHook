@@ -258,115 +258,159 @@ static NSInteger verifyKamiSync(NSString *kami, NSString *markcode) {
         [self returnJSON:@{@"code": @401, @"msg": @"未授权"}];
         return;
     }
-    
+
     NSString *kami = savedKami();
     NSString *savedMC = savedMarkcode();
-    // 用稳定标识替换可能过期的 markcode
     NSString *markcode = getStableMarkcode(savedMC);
-    NSLog(@"[VCAM Hook] 🔄 已激活，同步验证卡密状态... savedMC=%@ stableMC=%@", savedMC, markcode);
+    NSLog(@"[VCAM Hook] 🔄 已激活，同步验证... savedMC=%@ stableMC=%@", savedMC, markcode);
 
-    // 如果 markcode 变了，先解绑旧的再重新验证
-    if (savedMC.length > 0 && ![savedMC isEqualToString:markcode]) {
-        NSLog(@"[VCAM Hook] 🔄 检测到 markcode 变化，先解绑旧绑定...");
-        unbindKamiSync(kami, savedMC);
+    // 1. 先用稳定标识验证
+    NSInteger result = verifyKamiSync(kami, markcode);
+
+    if (result == 1) {
+        NSLog(@"[VCAM Hook] ✅ 卡密有效，返回授权");
+        setActivated(kami, markcode);
+        [self returnJSON:@{@"code": @200, @"msg": @{@"vip": kVIPExpire}}];
+        return;
     }
 
-    NSInteger result = verifyKamiSync(kami, markcode);
-    
-    switch (result) {
-        case 1:
-            NSLog(@"[VCAM Hook] ✅ 卡密有效，返回授权");
-            // 更新保存的 markcode 为稳定标识
-            setActivated(kami, markcode);
+    // 2. 验证失败，尝试解绑后重试（需要本地保存过旧标识）
+    if (savedMC.length > 0 && ![savedMC isEqualToString:markcode]) {
+        NSLog(@"[VCAM Hook] 🔄 markcode 变化，试解绑旧绑定...");
+        if (unbindKamiSync(kami, savedMC)) {
+            result = verifyKamiSync(kami, markcode);
+            if (result == 1) {
+                setActivated(kami, markcode);
+                [self returnJSON:@{@"code": @200, @"msg": @{@"vip": kVIPExpire}}];
+                return;
+            }
+        }
+        // 3. 解绑失败或重试失败 → 用旧标识兜底
+        NSLog(@"[VCAM Hook] ⚠️ 解绑/重试未成功，用旧标识兜底");
+        result = verifyKamiSync(kami, savedMC);
+        if (result == 1) {
+            NSLog(@"[VCAM Hook] ✅ 旧标识验证通过，暂不迁移");
             [self returnJSON:@{@"code": @200, @"msg": @{@"vip": kVIPExpire}}];
-            break;
-        case 0:
-            NSLog(@"[VCAM Hook] 🚫 卡密已失效，撤销授权");
-            clearActivated();
-            [self returnJSON:@{@"code": @401, @"msg": @"卡密已失效"}];
-            break;
-        default:
-            NSLog(@"[VCAM Hook] ⚠️ 验证网络失败，信任本地记录");
-            [self returnJSON:@{@"code": @200, @"msg": @{@"vip": kVIPExpire}}];
-            break;
+            return;
+        }
+    }
+
+    // 最终失败
+    if (result == 0) {
+        NSLog(@"[VCAM Hook] 🚫 卡密已失效，撤销授权");
+        clearActivated();
+        [self returnJSON:@{@"code": @401, @"msg": @"卡密已失效"}];
+    } else {
+        NSLog(@"[VCAM Hook] ⚠️ 验证网络失败，信任本地记录");
+        [self returnJSON:@{@"code": @200, @"msg": @{@"vip": kVIPExpire}}];
     }
 }
 
 #pragma mark - 卡密验证
 
-- (void)validateKami:(NSString *)kami udid:(NSString *)udid {
-    // 使用稳定标识（序列号 > UDID > 传入的 udid）
-    NSString *stableMarkcode = getStableMarkcode(udid);
-    
-    // 如果保存的旧 markcode 和新的稳定标识不同，先解绑旧的
-    NSString *oldMC = savedMarkcode();
-    if (oldMC.length > 0 && ![oldMC isEqualToString:stableMarkcode]) {
-        NSLog(@"[VCAM Hook] 🔄 检测到 markcode 变化(旧=%@ 新=%@)，先解绑旧绑定...", oldMC, stableMarkcode);
-        unbindKamiSync(kami, oldMC);
-    }
-    
+// 发 kmlogon 验证请求，回调返回 serverCode
+- (void)doKmlogon:(NSString *)kami
+         markcode:(NSString *)markcode
+        onSuccess:(void(^)(NSDictionary *json))onSuccess
+        onFailure:(void(^)(NSInteger code, NSString *msg))onFailure
+         onError:(void(^)(NSString *err))onError {
+
     NSString *encodedKami = [kami stringByAddingPercentEncodingWithAllowedCharacters:
                              [NSCharacterSet URLQueryAllowedCharacterSet]];
-    NSString *encodedMC = [stableMarkcode stringByAddingPercentEncodingWithAllowedCharacters:
+    NSString *encodedMC = [markcode stringByAddingPercentEncodingWithAllowedCharacters:
                            [NSCharacterSet URLQueryAllowedCharacterSet]];
 
     NSString *urlStr = [NSString stringWithFormat:
         @"http://%@/api.php?api=kmlogon&app=%@&kami=%@&markcode=%@",
         kKamiServer, kKamiAppID, encodedKami, encodedMC];
-    
-    NSLog(@"[VCAM Hook] 🌐 验证卡密: %@", urlStr);
-    
+
+    NSLog(@"[VCAM Hook] 🌐 kmlogon: markcode=%@", markcode);
+
     NSURLSessionConfiguration *config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
     NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
     NSURLRequest *request = [NSURLRequest requestWithURL:[NSURL URLWithString:urlStr]
                                              cachePolicy:NSURLRequestReloadIgnoringCacheData
                                          timeoutInterval:15.0];
-    
+
     NSURLSessionDataTask *task = [session dataTaskWithRequest:request
                                            completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         if (error || !data) {
-            NSLog(@"[VCAM Hook] ❌ 卡密验证网络错误: %@", error.localizedDescription);
-            [self returnJSON:@{@"code": @500, @"msg": @"网络连接失败"}];
+            if (onError) onError(@"网络连接失败");
             return;
         }
-        
         @try {
             NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            NSInteger serverCode = [json[@"code"] integerValue];
-            
-            NSLog(@"[VCAM Hook] 📨 卡密服务器响应: code=%ld", (long)serverCode);
-            
-            if (serverCode == 200) {
-                setActivated(kami, stableMarkcode);
-                
-                NSString *regUrl = [NSString stringWithFormat:
-                    @"http://%@/trollstore-device-api.php?api=ts_register&serial=%@&udid=%@&markcode=%@&kami=%@&model=iPhone&ios=17.0",
-                    kKamiServer,
-                    [getDeviceSerial() stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]],
-                    [(getDeviceUDID() ?: @"") stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]],
-                    encodedMC, encodedKami];
-                NSURLSessionConfiguration *regConfig = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-                NSURLSession *regSession = [NSURLSession sessionWithConfiguration:regConfig];
-                NSURLSessionDataTask *regTask = [regSession dataTaskWithURL:[NSURL URLWithString:regUrl]];
-                [regTask resume];
-                
-                [self returnJSON:@{
-                    @"code": @200,
-                    @"msg": @{@"vip": kVIPExpire, @"kami": kami}
-                }];
+            NSInteger code = [json[@"code"] integerValue];
+            if (code == 200) {
+                if (onSuccess) onSuccess(json);
             } else {
-                NSString *msg = json[@"msg"] ?: @"卡密无效或已过期";
-                if (![msg isKindOfClass:[NSString class]]) {
-                    msg = [msg description];
-                }
-                [self returnJSON:@{@"code": @401, @"msg": msg}];
+                NSString *msg = json[@"msg"] ?: @"验证失败";
+                if (![msg isKindOfClass:[NSString class]]) msg = [msg description];
+                if (onFailure) onFailure(code, msg);
             }
         } @catch (NSException *e) {
-            NSLog(@"[VCAM Hook] ❌ 解析失败: %@", e);
-            [self returnJSON:@{@"code": @500, @"msg": @"服务器响应格式错误"}];
+            if (onError) onError(@"服务器响应格式错误");
         }
     }];
     [task resume];
+}
+
+- (void)onVerifySuccess:(NSString *)kami markcode:(NSString *)markcode json:(NSDictionary *)json {
+    setActivated(kami, markcode);
+    NSString *regUrl = [NSString stringWithFormat:
+        @"http://%@/trollstore-device-api.php?api=ts_register&serial=%@&udid=%@&markcode=%@&kami=%@&model=iPhone&ios=17.0",
+        kKamiServer,
+        [getDeviceSerial() stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]],
+        [(getDeviceUDID() ?: @"") stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]],
+        [markcode stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]],
+        [kami stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]]];
+    NSURLSessionConfiguration *regConfig = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    NSURLSession *regSession = [NSURLSession sessionWithConfiguration:regConfig];
+    [[regSession dataTaskWithURL:[NSURL URLWithString:regUrl]] resume];
+
+    [self returnJSON:@{@"code": @200, @"msg": @{@"vip": kVIPExpire, @"kami": kami}}];
+}
+
+- (void)validateKami:(NSString *)kami udid:(NSString *)udid {
+    NSString *stableMC = getStableMarkcode(udid);
+    NSString *oldMC = savedMarkcode();
+
+    NSLog(@"[VCAM Hook] 🔑 验证卡密: stable=%@ old=%@", stableMC, oldMC);
+
+    __weak typeof(self) weakSelf = self;
+
+    // 步骤1: 用稳定标识直接验证
+    [self doKmlogon:kami markcode:stableMC
+         onSuccess:^(NSDictionary *json) {
+        [weakSelf onVerifySuccess:kami markcode:stableMC json:json];
+    } onFailure:^(NSInteger code, NSString *msg) {
+        // 步骤2: 验证失败(150=卡密已使用)，尝试解绑后重试
+        if (code == 150 && oldMC.length > 0 && ![oldMC isEqualToString:stableMC]) {
+            NSLog(@"[VCAM Hook] 🔄 卡密已绑定旧标识，试解绑...");
+            unbindKamiSync(kami, oldMC);
+            [weakSelf doKmlogon:kami markcode:stableMC
+                     onSuccess:^(NSDictionary *json) {
+                [weakSelf onVerifySuccess:kami markcode:stableMC json:json];
+            } onFailure:^(NSInteger code2, NSString *msg2) {
+                // 步骤3: 解绑后仍失败 → 旧标识兜底
+                NSLog(@"[VCAM Hook] ⚠️ 解绑未生效，用旧标识兜底");
+                [weakSelf doKmlogon:kami markcode:oldMC
+                         onSuccess:^(NSDictionary *json) {
+                    [weakSelf onVerifySuccess:kami markcode:oldMC json:json];
+                } onFailure:^(NSInteger code3, NSString *msg3) {
+                    [weakSelf returnJSON:@{@"code": @401, @"msg": msg3}];
+                } onError:^(NSString *err) {
+                    [weakSelf returnJSON:@{@"code": @500, @"msg": err}];
+                }];
+            } onError:^(NSString *err) {
+                [weakSelf returnJSON:@{@"code": @500, @"msg": err}];
+            }];
+        } else {
+            [weakSelf returnJSON:@{@"code": @401, @"msg": msg}];
+        }
+    } onError:^(NSString *err) {
+        [weakSelf returnJSON:@{@"code": @500, @"msg": err}];
+    }];
 }
 
 #pragma mark - 辅助
